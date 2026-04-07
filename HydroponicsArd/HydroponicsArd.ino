@@ -1,4 +1,9 @@
+// To do:
+// Consider scrapping environment temperature and humidity altogether
+// Check for clashes with delays
+
 #include <RTClib.h>
+#include <Wire.h>
 #include <LiquidCrystal.h>
 
 #include <OneWire.h>
@@ -81,6 +86,46 @@ float readLevel() {
   return (duration * 0.0343f) / 2.0f;
 }
 
+// Storing water level to DS1307 SRAM
+#define DS1307_ADDR 0x68
+#define SRAM_FLAG_ADDR  0 // Flag (1 = valid data saved, 0 = no data saved)
+#define SRAM_FLOAT_ADDR 1 // Bytes 1-4 for the float
+
+// Write a single byte to DS1307 SRAM, SRAM starts at register 0x08
+void ds1307_write_byte(uint8_t sram_offset, uint8_t value) {
+  Wire.beginTransmission(DS1307_ADDR);
+  Wire.write(0x08 + sram_offset);  // point to SRAM register
+  Wire.write(value);
+  Wire.endTransmission();
+}
+
+// Read a single byte from DS1307 SRAM
+uint8_t ds1307_read_byte(uint8_t sram_offset) {
+  Wire.beginTransmission(DS1307_ADDR);
+  Wire.write(0x08 + sram_offset);
+  Wire.endTransmission();
+  Wire.requestFrom((uint8_t) DS1307_ADDR, (uint8_t) 1);
+  return Wire.read();
+}
+
+// Store a float in DS1307 SRAM (uses 4 bytes starting at sram_offset)
+void sram_write_float(uint8_t sram_offset, float value) {
+  uint8_t *p = (uint8_t*)&value;  // treat float as 4 raw bytes
+  for (uint8_t i = 0; i < 4; i++) {
+    ds1307_write_byte(sram_offset + i, p[i]);
+  }
+}
+
+// Read a float from DS1307 SRAM
+float sram_read_float(uint8_t sram_offset) {
+  float value;
+  uint8_t *p = (uint8_t*)&value;
+  for (uint8_t i = 0; i < 4; i++) {
+    p[i] = ds1307_read_byte(sram_offset + i);
+  }
+  return value;
+}
+
 // Timer code
 class RelayTimer{
   long pumpOn;
@@ -100,11 +145,36 @@ public:
 
   bool isPumpOn() const {return pumpIsOn;}
   bool isLightOn() const {return lightIsOn;}
-  unsigned long timeAfterPumpOff() const {
+  long timeAfterPumpOff() const {
     if(pumpIsOn)
       return 0;
     else
       return cycleSeconds - pumpOn;
+  }
+
+  void setup(const DateTime &dt){
+    totalSeconds = timeFromHMS(dt.hour(), dt.minute(), dt.second());
+    cycleSeconds = totalSeconds % pumpCycle;
+
+    pinMode(LEG_SHIFT, OUTPUT);
+    if(cycleSeconds < pumpOn){
+      digitalWrite(LEG_SHIFT, LOW);
+      pumpIsOn = true;
+    }
+    else{
+      digitalWrite(LEG_SHIFT, HIGH);
+      pumpIsOn = false;
+    }
+
+    pinMode(LEG_SHIFT+1, OUTPUT);
+    if(totalSeconds >= lightOn && totalSeconds < lightOff){
+      digitalWrite(LEG_SHIFT+1, LOW);
+      lightIsOn = true;
+    }
+    else{
+      digitalWrite(LEG_SHIFT+1, HIGH);
+      lightIsOn = false;
+    }
   }
 
   void update(const DateTime &dt){
@@ -138,7 +208,7 @@ public:
     }
     else{
       digitalWrite(LEG_SHIFT+1, HIGH);
-      if(lightIsOn) lcd.begin(16, 2);{ // Resetting the screen after relay click
+      if(lightIsOn){ // Resetting the screen after relay click
         delay(100);
         lcd.begin(16, 2);
         lightIsOn = false;
@@ -176,7 +246,7 @@ public:
     lcd.print(line1);
   }
 
-} relay_timer(900, 900, timeFromHMS(6,0,0), timeFromHMS(22,0,0));
+} relay_timer(900, 2700, timeFromHMS(6,0,0), timeFromHMS(22,0,0));
 
 // Measurement code
 class Measurements{
@@ -191,24 +261,46 @@ class Measurements{
   float extTemp;
   float extHumidity;
 
+  bool waterLevelFrozen;
+
 public:
   Measurements(long _databaseSaveInverval, long _levelMeasureCooldown): databaseSaveInverval(_databaseSaveInverval),
-    levelMeasureCooldown(_levelMeasureCooldown), lastSave(0), waterTemp(0), waterLevel(0), ph(7), ec(1), extTemp(0), extHumidity(0) {}
+    levelMeasureCooldown(_levelMeasureCooldown), lastSave(0), waterTemp(0), waterLevel(-1.0f), ph(7), ec(1), extTemp(0), extHumidity(0),
+    waterLevelFrozen(false) {}
 
   void setLastMeasurement(const DateTime &dt){
     lastSave = dt.unixtime();
   }
 
+  void recoverWaterLevel(){
+    if(ds1307_read_byte(SRAM_FLAG_ADDR) == 1){
+      waterLevel = sram_read_float(SRAM_FLOAT_ADDR);
+      waterLevelFrozen = true;
+    }
+    else
+      waterLevelFrozen = false;
+  }
+
   void update(const DateTime &dt){
     tempSensor.requestTemperatures();
     waterTemp = tempSensor.getTempCByIndex(0);
-    if(relay_timer.timeAfterPumpOff() >= levelMeasureCooldown)
+    if(relay_timer.timeAfterPumpOff() >= levelMeasureCooldown){
       waterLevel = 24.6 - readLevel(); // Bucket depth with no water as measured by ultrasound is 24.6
+      if(waterLevelFrozen){
+        ds1307_write_byte(SRAM_FLAG_ADDR, 0);
+        waterLevelFrozen = false;
+      }
+    }
+    else if(!waterLevelFrozen){
+      ds1307_write_byte(SRAM_FLAG_ADDR, 1);
+      sram_write_float(SRAM_FLOAT_ADDR, waterLevel);
+      waterLevelFrozen = true;
+    }
     dht_sensor.measure(&extTemp, &extHumidity);
 
     uint32_t timestamp = dt.unixtime();
     if(timestamp - lastSave >= databaseSaveInverval){
-      StaticJsonDocument<256> doc;
+      StaticJsonDocument<384> doc;
       doc["temp"] = waterTemp;
       doc["ph"] = ph;
       doc["ec"] = ec;
@@ -264,16 +356,12 @@ void setup() {
   last_second = dt.second();
   measurements.setLastMeasurement(dt);
 
+  // Relay and buttons pins setup
+  relay_timer.setup(dt);
+  pinMode(BUTTON_1, INPUT_PULLUP);
+
   // LCD setup
   lcd.begin(16, 2); // Number of rows and columns
-
-  // Relay and buttons pins setup
-  for(int i = LEG_SHIFT; i < LEG_SHIFT+4; ++i){
-    pinMode(i, OUTPUT);
-    digitalWrite(i, HIGH);
-  }
-
-  pinMode(BUTTON_1, INPUT_PULLUP);
 
   // Sensors setup
   tempSensor.begin();
@@ -286,6 +374,7 @@ void setup() {
   Serial1.begin(115200);
 
   // Getting a reading before pump is switched on
+  measurements.recoverWaterLevel();
   measurements.update(dt);
 }
 
