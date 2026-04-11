@@ -1,18 +1,14 @@
-// To do:
-// Consider scrapping environment temperature and humidity altogether
-// Check for clashes with delays
-
 #include <RTClib.h>
 #include <Wire.h>
-#include <LiquidCrystal.h>
+#include <LiquidCrystal_I2C.h>
+#include <avr/wdt.h>
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ArduinoJson.h>
-#include <dht_nonblocking.h>
 
 RTC_DS1307 rtc;
-LiquidCrystal lcd(23, 22, 27, 26, 25, 24);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 #define BUTTON_1 28
 #define LEG_SHIFT 30
@@ -27,11 +23,6 @@ DallasTemperature tempSensor(&oneWire);
 #define TRIG_PIN 5
 #define ECHO_PIN 6
 #define TIMEOUT_US 30000
-
-// DHT crude temperature humidity sensor
-#define DHT_SENSOR_TYPE DHT_TYPE_11
-#define DHT_SENSOR_PIN 7
-DHT_nonblocking dht_sensor(DHT_SENSOR_PIN, DHT_SENSOR_TYPE);
 
 // Temp variables
 int last_second;
@@ -183,36 +174,24 @@ public:
 
     if(cycleSeconds < pumpOn){
       digitalWrite(LEG_SHIFT, LOW);
-      if(!pumpIsOn){ // Resetting the screen after relay click
-        delay(100);
-        lcd.begin(16, 2);
+      if(!pumpIsOn)
         pumpIsOn = true;
-      }
     }
     else{
       digitalWrite(LEG_SHIFT, HIGH);
-      if(pumpIsOn){ // Resetting the screen after relay click
-        delay(100);
-        lcd.begin(16, 2);
+      if(pumpIsOn)
         pumpIsOn = false;
-      }
     }
 
     if(totalSeconds >= lightOn && totalSeconds < lightOff){
       digitalWrite(LEG_SHIFT+1, LOW);
-      if(!lightIsOn){ // Resetting the screen after relay click
-        delay(100);
-        lcd.begin(16, 2);
+      if(!lightIsOn)
         lightIsOn = true;
-      }
     }
     else{
       digitalWrite(LEG_SHIFT+1, HIGH);
-      if(lightIsOn){ // Resetting the screen after relay click
-        delay(100);
-        lcd.begin(16, 2);
+      if(lightIsOn)
         lightIsOn = false;
-      }
     }
   }
 
@@ -258,14 +237,12 @@ class Measurements{
   float waterLevel;
   float ph;
   float ec;
-  float extTemp;
-  float extHumidity;
 
   bool waterLevelFrozen;
 
 public:
   Measurements(long _databaseSaveInverval, long _levelMeasureCooldown): databaseSaveInverval(_databaseSaveInverval),
-    levelMeasureCooldown(_levelMeasureCooldown), lastSave(0), waterTemp(0), waterLevel(-1.0f), ph(7), ec(1), extTemp(0), extHumidity(0),
+    levelMeasureCooldown(_levelMeasureCooldown), lastSave(0), waterTemp(0), waterLevel(-1.0f), ph(7), ec(1),
     waterLevelFrozen(false) {}
 
   void setLastMeasurement(const DateTime &dt){
@@ -296,7 +273,6 @@ public:
       sram_write_float(SRAM_FLOAT_ADDR, waterLevel);
       waterLevelFrozen = true;
     }
-    dht_sensor.measure(&extTemp, &extHumidity);
 
     uint32_t timestamp = dt.unixtime();
     if(timestamp - lastSave >= databaseSaveInverval){
@@ -305,17 +281,26 @@ public:
       doc["ph"] = ph;
       doc["ec"] = ec;
       doc["wlevel"] = waterLevel;
-      doc["etemp"] = extTemp;
-      doc["erh"] = extHumidity;
       doc["pump"] = relay_timer.isPumpOn();
       doc["light"] = relay_timer.isLightOn();
 
       String payload;
       serializeJson(doc, payload);
 
-      Serial1.println(payload);   // → ESP32 via TX1/RX1 (pins 18/19)
+      Serial1.println(payload);   // ESP32 via TX1/RX1 (pins 18/19)
       debugLog("Sent: " + payload);
       lastSave = timestamp;
+    }
+  }
+
+  void serialCheck(){
+    if(Serial2.available()) {
+      String response = Serial2.readStringUntil('\r');
+      ph = response.toFloat();
+    }
+    if(Serial3.available()) {
+      String response = Serial3.readStringUntil('\r');
+      ec = response.toFloat()/1000;
     }
   }
 
@@ -343,6 +328,9 @@ public:
 } measurements(60, 30);
 
 void setup() {
+  MCUSR = 0;
+  wdt_disable();
+
   // Clock setup
   if (!rtc.begin()) {
     Serial.println("RTC not found!");
@@ -361,7 +349,8 @@ void setup() {
   pinMode(BUTTON_1, INPUT_PULLUP);
 
   // LCD setup
-  lcd.begin(16, 2); // Number of rows and columns
+  lcd.init();
+  lcd.backlight();
 
   // Sensors setup
   tempSensor.begin();
@@ -370,16 +359,29 @@ void setup() {
   pinMode(ECHO_PIN, INPUT);
   digitalWrite(TRIG_PIN, LOW);
 
+  // Atlas Scientific probes setup
+  Serial2.begin(9600);
+  Serial3.begin(9600);
+
+  // Debug serials
   Serial.begin(115200);
   Serial1.begin(115200);
 
   // Getting a reading before pump is switched on
   measurements.recoverWaterLevel();
   measurements.update(dt);
+
+  // Letting everything boot
+  delay(1000);
+  wdt_enable(WDTO_4S);
 }
 
 void loop() {
+  wdt_reset();
+
   DateTime dt = rtc.now();
+  measurements.serialCheck();
+
   if(dt.second() != last_second){
     measurements.update(dt);
     relay_timer.update(dt);
