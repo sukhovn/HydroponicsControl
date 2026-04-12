@@ -10,9 +10,11 @@
 RTC_DS1307 rtc;
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
+// Button and pump leg shift parameters
 #define BUTTON_1 28
 #define LEG_SHIFT 30
 
+// One wire bus
 #define ONE_WIRE_BUS 4
 // Setup a oneWire instance to communicate with any OneWire devices
 OneWire oneWire(ONE_WIRE_BUS);
@@ -28,22 +30,12 @@ DallasTemperature tempSensor(&oneWire);
 int last_second;
 char line0[17];
 char line1[17];
+char serialBuffer[20];
 
-void debugLog(String msg) {
-  Serial.println(msg);   // USB → PC Serial Monitor
-}
+StaticJsonDocument<384> doc;
+char serialESPBuffer[384];
 
-void checkESP32Messages() {
-  // Read any debug messages coming back from ESP32
-  while (Serial1.available()) {
-    String msg = Serial1.readStringUntil('\n');
-    msg.trim();
-    if (msg.length() > 0) {
-      debugLog("ESP32: " + msg);
-    }
-  }
-}
-
+// Time functions
 long timeFromHMS(long hour, long minute, long second){
   return 3600 * hour + 60 * minute + second;
 }
@@ -58,6 +50,20 @@ void formatCountdown(long secs, char* buf, int bufSize) {
     int s = secs % 60;
     snprintf(buf, bufSize, "%02d:%02d", m, s);
   }
+}
+
+// Valid float check
+bool isValidFloat(const char* buf) {
+    if (buf == nullptr || buf[0] == '\0') return false;
+    bool hasDot = false, hasDigit = false;
+    int i = 0;
+    if (buf[0] == '-') i++;
+    for (; buf[i] != '\0'; i++) {
+        if (buf[i] == '.' && !hasDot) { hasDot = true; continue; }
+        if (buf[i] < '0' || buf[i] > '9') return false;
+        hasDigit = true;
+    }
+    return hasDigit;
 }
 
 // Reading water level
@@ -117,6 +123,20 @@ float sram_read_float(uint8_t sram_offset) {
   return value;
 }
 
+// ESP32 receiver function
+void checkESP32Messages() {
+  while (Serial1.available()) {
+    int len = Serial1.readBytesUntil('\n', serialESPBuffer, sizeof(serialESPBuffer)-1);
+    if (len > 0 && serialESPBuffer[len-1] == '\r') len--;  // trim trailing \r
+    serialESPBuffer[len] = '\0';
+
+    if(len > 0){
+      Serial.print(F("ESP32: "));
+      Serial.println(serialESPBuffer);
+    }
+  }
+}
+
 // Timer code
 class RelayTimer{
   long pumpOn;
@@ -144,6 +164,7 @@ public:
   }
 
   void setup(const DateTime &dt){
+    // Setting up initial relay configuration
     totalSeconds = timeFromHMS(dt.hour(), dt.minute(), dt.second());
     cycleSeconds = totalSeconds % pumpCycle;
 
@@ -174,24 +195,36 @@ public:
 
     if(cycleSeconds < pumpOn){
       digitalWrite(LEG_SHIFT, LOW);
-      if(!pumpIsOn)
+      if(!pumpIsOn){
+        lcd.init();
+        lcd.backlight();
         pumpIsOn = true;
+      }
     }
     else{
       digitalWrite(LEG_SHIFT, HIGH);
-      if(pumpIsOn)
+      if(pumpIsOn){
+        lcd.init();
+        lcd.backlight();
         pumpIsOn = false;
+      }
     }
 
     if(totalSeconds >= lightOn && totalSeconds < lightOff){
       digitalWrite(LEG_SHIFT+1, LOW);
-      if(!lightIsOn)
+      if(!lightIsOn){
+        lcd.init();
+        lcd.backlight();
         lightIsOn = true;
+      }
     }
     else{
       digitalWrite(LEG_SHIFT+1, HIGH);
-      if(lightIsOn)
+      if(lightIsOn){
+        lcd.init();
+        lcd.backlight();
         lightIsOn = false;
+      }
     }
   }
 
@@ -276,7 +309,7 @@ public:
 
     uint32_t timestamp = dt.unixtime();
     if(timestamp - lastSave >= databaseSaveInverval){
-      StaticJsonDocument<384> doc;
+      doc.clear();
       doc["temp"] = waterTemp;
       doc["ph"] = ph;
       doc["ec"] = ec;
@@ -284,23 +317,33 @@ public:
       doc["pump"] = relay_timer.isPumpOn();
       doc["light"] = relay_timer.isLightOn();
 
-      String payload;
-      serializeJson(doc, payload);
+      serializeJson(doc, serialESPBuffer, sizeof(serialESPBuffer));
+      Serial1.println(serialESPBuffer);   // ESP32 via TX1/RX1 (pins 18/19)
 
-      Serial1.println(payload);   // ESP32 via TX1/RX1 (pins 18/19)
-      debugLog("Sent: " + payload);
+      Serial.print(F("Sent: "));
+      Serial.println(serialESPBuffer);
+
       lastSave = timestamp;
     }
   }
 
   void serialCheck(){
-    if(Serial2.available()) {
-      String response = Serial2.readStringUntil('\r');
-      ph = response.toFloat();
+    if(Serial2.available()){
+      int len = Serial2.readBytesUntil('\r', serialBuffer, sizeof(serialBuffer)-1);
+      serialBuffer[len] = '\0';
+      if(isValidFloat(serialBuffer)){
+        float val = atof(serialBuffer);
+        if (val >= 0.0 && val <= 14.0) ph = val;
+      }
     }
-    if(Serial3.available()) {
-      String response = Serial3.readStringUntil('\r');
-      ec = response.toFloat()/1000;
+
+    if (Serial3.available()) {
+      int len = Serial3.readBytesUntil('\r', serialBuffer, sizeof(serialBuffer) - 1);
+      serialBuffer[len] = '\0';
+      if(isValidFloat(serialBuffer)){
+        float val = atof(serialBuffer);
+        if(val >= 0.0) ec = val/1000;
+      }
     }
   }
 
@@ -331,13 +374,16 @@ void setup() {
   MCUSR = 0;
   wdt_disable();
 
+  // Debug serial
+  Serial.begin(115200);
+
   // Clock setup
   if (!rtc.begin()) {
-    Serial.println("RTC not found!");
+    Serial.println(F("RTC not found!"));
     while (1);
   }
   if (!rtc.isrunning()) {
-    Serial.println("RTC not running, setting time...");
+    Serial.println(F("RTC not running, setting time..."));
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
   DateTime dt = rtc.now();
@@ -359,17 +405,19 @@ void setup() {
   pinMode(ECHO_PIN, INPUT);
   digitalWrite(TRIG_PIN, LOW);
 
+  // ESP32 serial
+  Serial1.begin(115200);
+
   // Atlas Scientific probes setup
   Serial2.begin(9600);
   Serial3.begin(9600);
 
-  // Debug serials
-  Serial.begin(115200);
-  Serial1.begin(115200);
-
-  // Getting a reading before pump is switched on
+  // Setting water level after reset
   measurements.recoverWaterLevel();
   measurements.update(dt);
+
+  Serial2.print(F("R\r"));
+  Serial3.print(F("R\r"));
 
   // Letting everything boot
   delay(1000);
