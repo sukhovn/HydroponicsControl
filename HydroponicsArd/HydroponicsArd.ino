@@ -2,6 +2,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <avr/wdt.h>
+#include <EEPROM.h>
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -9,6 +10,18 @@
 
 RTC_DS1307 rtc;
 LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// EEPROM address to store timer config
+#define EEPROM_ADDR 0
+#define EEPROM_MAGIC 0xAB  // sentinel to detect valid data
+
+struct RelayConfig{
+  uint8_t magic;
+  long pumpOn;
+  long pumpCycle;
+  long lightOn;
+  long lightOff;
+};
 
 // Button and pump leg shift parameters
 #define BUTTON_1 28
@@ -27,7 +40,7 @@ DallasTemperature tempSensor(&oneWire);
 #define TIMEOUT_US 30000
 
 // Temp variables
-int last_second;
+uint8_t last_second;
 char line0[17];
 char line1[17];
 char serialBuffer[20];
@@ -54,16 +67,16 @@ void formatCountdown(long secs, char* buf, int bufSize) {
 
 // Valid float check
 bool isValidFloat(const char* buf) {
-    if (buf == nullptr || buf[0] == '\0') return false;
-    bool hasDot = false, hasDigit = false;
-    int i = 0;
-    if (buf[0] == '-') i++;
-    for (; buf[i] != '\0'; i++) {
-        if (buf[i] == '.' && !hasDot) { hasDot = true; continue; }
-        if (buf[i] < '0' || buf[i] > '9') return false;
-        hasDigit = true;
-    }
-    return hasDigit;
+  if (buf == nullptr || buf[0] == '\0') return false;
+  bool hasDot = false, hasDigit = false;
+  int i = 0;
+  if (buf[0] == '-') i++;
+  for (; buf[i] != '\0'; i++) {
+    if (buf[i] == '.' && !hasDot) { hasDot = true; continue; }
+    if (buf[i] < '0' || buf[i] > '9') return false;
+    hasDigit = true;
+  }
+  return hasDigit;
 }
 
 // Reading water level
@@ -123,17 +136,12 @@ float sram_read_float(uint8_t sram_offset) {
   return value;
 }
 
-// ESP32 receiver function
-void checkESP32Messages() {
-  while (Serial1.available()) {
-    int len = Serial1.readBytesUntil('\n', serialESPBuffer, sizeof(serialESPBuffer)-1);
-    if (len > 0 && serialESPBuffer[len-1] == '\r') len--;  // trim trailing \r
-    serialESPBuffer[len] = '\0';
-
-    if(len > 0){
-      Serial.print(F("ESP32: "));
-      Serial.println(serialESPBuffer);
-    }
+// Sending debugs to ESP32
+void debugLog(const char* msg) {
+  Serial.println(msg);
+  int len = snprintf(serialESPBuffer, sizeof(serialESPBuffer), "{\"cmd\":\"log\",\"message\":\"%s\"}", msg);
+  if (len > 0 && len < sizeof(serialESPBuffer)) {
+    Serial1.println(serialESPBuffer);
   }
 }
 
@@ -149,10 +157,44 @@ class RelayTimer{
   long totalSeconds;
   long cycleSeconds;
 
+  void saveRelayConfig(){
+    RelayConfig cfg = {EEPROM_MAGIC, pumpOn, pumpCycle, lightOn, lightOff};
+    EEPROM.put(EEPROM_ADDR, cfg);
+  }
+
 public:
-  RelayTimer(long _pumpOn, long _pumpOff, long _lightOn, long _ligtsOff):
-    pumpOn(_pumpOn), pumpCycle(_pumpOn+_pumpOff), lightOn(_lightOn), lightOff(_ligtsOff),
+  RelayTimer(long _pumpOn, long _pumpOff, long _lightOn, long _lightOff):
+    pumpOn(_pumpOn), pumpCycle(_pumpOn+_pumpOff), lightOn(_lightOn), lightOff(_lightOff),
     pumpIsOn(false), lightIsOn(false), totalSeconds(0), cycleSeconds(0) {};
+
+  void updateRelayConfig(long _pumpOn, long _pumpCycle, long _lightOn, long _lightOff){
+    pumpOn = _pumpOn; pumpCycle = _pumpCycle; lightOn = _lightOn; lightOff = _lightOff;
+    saveRelayConfig();
+
+    char lightOnBuf[6], lightOffBuf[6];
+    formatCountdown(lightOn, lightOnBuf, sizeof(lightOnBuf));
+    formatCountdown(lightOff, lightOffBuf, sizeof(lightOffBuf));
+
+    char localBuf[80];
+    snprintf(localBuf, sizeof(localBuf), "Relay config updated: Pump ON=%ld OFF=%ld | Light ON=%s OFF=%s",
+             pumpOn/60, (pumpCycle - pumpOn)/60, lightOnBuf, lightOffBuf);
+    debugLog(localBuf);
+  }
+
+  void sendConfigReport() {
+    doc.clear();
+    doc["cmd"]       = "configReport";
+    doc["pumpOn"]    = pumpOn;
+    doc["pumpCycle"] = pumpCycle;
+    doc["lightOn"]   = lightOn;
+    doc["lightOff"]  = lightOff;
+
+    serializeJson(doc, serialESPBuffer, sizeof(serialESPBuffer));
+    Serial1.println(serialESPBuffer);
+
+    Serial.print("Sent configReport to ESP32: ");
+    Serial.println(serialESPBuffer);
+  }
 
   bool isPumpOn() const {return pumpIsOn;}
   bool isLightOn() const {return lightIsOn;}
@@ -164,6 +206,30 @@ public:
   }
 
   void setup(const DateTime &dt){
+    // Clecking if relay config is in EEPROM and loading it
+    RelayConfig cfg;
+    EEPROM.get(EEPROM_ADDR, cfg);
+
+    if(cfg.magic == EEPROM_MAGIC){
+      pumpOn = cfg.pumpOn;
+      pumpCycle = cfg.pumpCycle;
+      lightOn = cfg.lightOn;
+      lightOff = cfg.lightOff;
+
+      char lightOnBuf[6], lightOffBuf[6];
+      formatCountdown(lightOn, lightOnBuf, sizeof(lightOnBuf));
+      formatCountdown(lightOff, lightOffBuf, sizeof(lightOffBuf));
+
+      char localBuf[80];
+      snprintf(localBuf, sizeof(localBuf), "Loaded from EEPROM: Pump ON=%ld OFF=%ld | Light ON=%s OFF=%s",
+               pumpOn/60, (pumpCycle - pumpOn)/60, lightOnBuf, lightOffBuf);
+      debugLog(localBuf);
+    }
+    else{
+      debugLog("No valid EEPROM data, using defaults");
+      saveRelayConfig();
+    }
+
     // Setting up initial relay configuration
     totalSeconds = timeFromHMS(dt.hour(), dt.minute(), dt.second());
     cycleSeconds = totalSeconds % pumpCycle;
@@ -199,6 +265,7 @@ public:
         lcd.init();
         lcd.backlight();
         pumpIsOn = true;
+        debugLog("Pump switched on");
       }
     }
     else{
@@ -207,6 +274,7 @@ public:
         lcd.init();
         lcd.backlight();
         pumpIsOn = false;
+        debugLog("Pump switched off");
       }
     }
 
@@ -216,6 +284,7 @@ public:
         lcd.init();
         lcd.backlight();
         lightIsOn = true;
+        debugLog("Light switched on");
       }
     }
     else{
@@ -224,31 +293,38 @@ public:
         lcd.init();
         lcd.backlight();
         lightIsOn = false;
+        debugLog("Light switched off");
       }
     }
   }
 
   void printStatus(){
+    char cntBuf[6];
+
     memset(line0, ' ', 16);
     line0[16] = '\0'; 
-    if(cycleSeconds < pumpOn){
-      snprintf(line0, sizeof(line0), "Pump off: ");
-      formatCountdown(pumpOn-cycleSeconds, line0+10, 7);
-    }
-    else{
-      snprintf(line0, sizeof(line0), "Pump on: ");
-      formatCountdown(pumpCycle-cycleSeconds, line0+9, 8);
+    if (cycleSeconds < pumpOn) {
+      memcpy(line0, "Pump on:  ", 10);
+      formatCountdown(pumpOn - cycleSeconds, cntBuf, sizeof(cntBuf));
+      memcpy(line0 + 10, cntBuf, 5);
+    } else {
+      memcpy(line0, "Pump off: ", 10);
+      formatCountdown(pumpCycle - cycleSeconds, cntBuf, sizeof(cntBuf));
+      memcpy(line0 + 10, cntBuf, 5);
     }
 
     memset(line1, ' ', 16);
     line1[16] = '\0'; 
     if(totalSeconds >= lightOn && totalSeconds < lightOff){
-      snprintf(line1, sizeof(line1), "Light off: ");
-      formatCountdown(lightOff-totalSeconds, line1+11, 6);
+      memcpy(line1, "Light off: ", 11);
+      formatCountdown(lightOff - totalSeconds, cntBuf, sizeof(cntBuf));
+      memcpy(line1 + 11, cntBuf, 5);
     }
     else{
-      snprintf(line1, sizeof(line1), "Light on: ");
-      formatCountdown(lightOn < totalSeconds ? 86400+lightOn-totalSeconds: lightOn-totalSeconds, line1+10, 7);
+      memcpy(line1, "Light on:  ", 11);
+      long t = lightOn < totalSeconds ? 86400 + lightOn - totalSeconds : lightOn - totalSeconds;
+      formatCountdown(t, cntBuf, sizeof(cntBuf));
+      memcpy(line1 + 11, cntBuf, 5);
     }
 
     lcd.clear();
@@ -272,6 +348,23 @@ class Measurements{
   float ec;
 
   bool waterLevelFrozen;
+
+  void sendReading(){
+    doc.clear();
+    doc["cmd"] = "reading";
+    doc["temp"] = waterTemp;
+    doc["ph"] = ph;
+    doc["ec"] = ec;
+    doc["wlevel"] = waterLevel;
+    doc["pump"] = relay_timer.isPumpOn();
+    doc["light"] = relay_timer.isLightOn();
+
+    serializeJson(doc, serialESPBuffer, sizeof(serialESPBuffer));
+    Serial1.println(serialESPBuffer);   // ESP32 via TX1/RX1 (pins 18/19)
+
+    Serial.print(F("Sent: "));
+    Serial.println(serialESPBuffer);
+  }
 
 public:
   Measurements(long _databaseSaveInverval, long _levelMeasureCooldown): databaseSaveInverval(_databaseSaveInverval),
@@ -309,20 +402,7 @@ public:
 
     uint32_t timestamp = dt.unixtime();
     if(timestamp - lastSave >= databaseSaveInverval){
-      doc.clear();
-      doc["temp"] = waterTemp;
-      doc["ph"] = ph;
-      doc["ec"] = ec;
-      doc["wlevel"] = waterLevel;
-      doc["pump"] = relay_timer.isPumpOn();
-      doc["light"] = relay_timer.isLightOn();
-
-      serializeJson(doc, serialESPBuffer, sizeof(serialESPBuffer));
-      Serial1.println(serialESPBuffer);   // ESP32 via TX1/RX1 (pins 18/19)
-
-      Serial.print(F("Sent: "));
-      Serial.println(serialESPBuffer);
-
+      sendReading();
       lastSave = timestamp;
     }
   }
@@ -370,20 +450,65 @@ public:
   }
 } measurements(60, 30);
 
+// ESP32 receiver function
+void checkESP32Messages() {
+  while (Serial1.available()) {
+    int len = Serial1.readBytesUntil('\n', serialESPBuffer, sizeof(serialESPBuffer)-1);
+    if (len > 0 && serialESPBuffer[len-1] == '\r') len--;  // trim trailing \r
+    serialESPBuffer[len] = '\0';
+
+    DeserializationError err = deserializeJson(doc, serialESPBuffer);
+    if(!err){
+      if(doc.containsKey("cmd")){
+        const char* cmd = doc["cmd"];
+        if(strcmp(cmd, "setRelay") == 0){
+          if(doc.containsKey("pumpOn") && doc.containsKey("pumpCycle") && doc.containsKey("lightOn") && doc.containsKey("lightOff")){
+            relay_timer.updateRelayConfig(doc["pumpOn"].as<long>(), doc["pumpCycle"].as<long>(),
+                                          doc["lightOn"].as<long>(), doc["lightOff"].as<long>());
+          }
+          else{
+            debugLog("setRelay missing fields");
+          }
+        }
+        else if(strcmp(cmd, "getConfig") == 0){
+          relay_timer.sendConfigReport();
+        }
+        else{
+          char localBuf[80];
+          snprintf(localBuf, sizeof(localBuf), "Unknown cmd: %s", cmd);
+          debugLog(localBuf);
+        }
+      }
+      else{
+        debugLog(serialESPBuffer);
+      }
+    }
+
+    if(len > 0){
+      Serial.print(F("ESP32: "));
+      Serial.println(serialESPBuffer);
+    }
+  }
+}
+
 void setup() {
   MCUSR = 0;
   wdt_disable();
 
   // Debug serial
   Serial.begin(115200);
+  // ESP32 serial
+  Serial1.begin(115200);
+  delay(1000);
 
+  debugLog("Mega 2560 reboot");
   // Clock setup
   if (!rtc.begin()) {
-    Serial.println(F("RTC not found!"));
+    debugLog("RTC not found!");
     while (1);
   }
   if (!rtc.isrunning()) {
-    Serial.println(F("RTC not running, setting time..."));
+    debugLog("RTC not running, setting time...");
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
   DateTime dt = rtc.now();
@@ -404,9 +529,6 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   digitalWrite(TRIG_PIN, LOW);
-
-  // ESP32 serial
-  Serial1.begin(115200);
 
   // Atlas Scientific probes setup
   Serial2.begin(9600);
