@@ -154,8 +154,10 @@ class RelayTimer{
 
   bool pumpIsOn;
   bool lightIsOn;
-  long totalSeconds;
+  uint32_t totalSeconds;
+  long daySeconds;
   long cycleSeconds;
+  uint32_t pumpOffTime;
 
   bool pumpOverride;
   bool lightOverride;
@@ -176,6 +178,7 @@ class RelayTimer{
       lcd.init();
       lcd.backlight();
       pumpIsOn = false;
+      pumpOffTime = totalSeconds;
       debugLog("Pump switched off");
     }
   }
@@ -208,8 +211,8 @@ class RelayTimer{
 public:
   RelayTimer(long _pumpOn, long _pumpOff, long _lightOn, long _lightOff):
     pumpOn(_pumpOn), pumpCycle(_pumpOn+_pumpOff), lightOn(_lightOn), lightOff(_lightOff),
-    pumpIsOn(false), lightIsOn(false), totalSeconds(0), cycleSeconds(0),
-    pumpOverride(false), lightOverride(false) {};
+    pumpIsOn(false), lightIsOn(false), totalSeconds(0), daySeconds(0), cycleSeconds(0),
+    pumpOffTime(0), pumpOverride(false), lightOverride(false) {};
 
   void updateRelayConfig(long _pumpOn, long _pumpCycle, long _lightOn, long _lightOff){
     pumpOn = _pumpOn; pumpCycle = _pumpCycle; lightOn = _lightOn; lightOff = _lightOff;
@@ -246,7 +249,7 @@ public:
     if(pumpIsOn)
       return 0;
     else
-      return cycleSeconds - pumpOn;
+      return totalSeconds - pumpOffTime;
   }
 
   void setup(const DateTime &dt){
@@ -275,7 +278,8 @@ public:
     }
 
     // Setting up initial relay configuration
-    totalSeconds = timeFromHMS(dt.hour(), dt.minute(), dt.second());
+    totalSeconds = dt.unixtime();
+    daySeconds = totalSeconds % 86400;
     cycleSeconds = totalSeconds % pumpCycle;
 
     pinMode(LEG_SHIFT, OUTPUT);
@@ -286,10 +290,11 @@ public:
     else{
       digitalWrite(LEG_SHIFT, HIGH);
       pumpIsOn = false;
+      pumpOffTime = (totalSeconds/pumpCycle)*pumpCycle + pumpOn;
     }
 
     pinMode(LEG_SHIFT+1, OUTPUT);
-    if(totalSeconds >= lightOn && totalSeconds < lightOff){
+    if(daySeconds >= lightOn && daySeconds < lightOff){
       digitalWrite(LEG_SHIFT+1, LOW);
       lightIsOn = true;
     }
@@ -303,7 +308,8 @@ public:
   }
 
   void update(const DateTime &dt){
-    totalSeconds = timeFromHMS(dt.hour(), dt.minute(), dt.second());
+    totalSeconds = dt.unixtime();
+    daySeconds = totalSeconds % 86400;
     cycleSeconds = totalSeconds % pumpCycle;
 
     if(!pumpOverride){
@@ -314,7 +320,7 @@ public:
     }
 
     if(!lightOverride){
-      if(totalSeconds >= lightOn && totalSeconds < lightOff)
+      if(daySeconds >= lightOn && daySeconds < lightOff)
         switchLightOn();
       else
         switchLightOff();
@@ -324,30 +330,40 @@ public:
   void printStatus(){
     char cntBuf[6];
 
-    memset(line0, ' ', 16);
-    line0[16] = '\0'; 
-    if (cycleSeconds < pumpOn) {
-      memcpy(line0, "Pump on:  ", 10);
-      formatCountdown(pumpOn - cycleSeconds, cntBuf, sizeof(cntBuf));
-      memcpy(line0 + 10, cntBuf, 5);
-    } else {
-      memcpy(line0, "Pump off: ", 10);
-      formatCountdown(pumpCycle - cycleSeconds, cntBuf, sizeof(cntBuf));
-      memcpy(line0 + 10, cntBuf, 5);
-    }
-
-    memset(line1, ' ', 16);
-    line1[16] = '\0'; 
-    if(totalSeconds >= lightOn && totalSeconds < lightOff){
-      memcpy(line1, "Light off: ", 11);
-      formatCountdown(lightOff - totalSeconds, cntBuf, sizeof(cntBuf));
-      memcpy(line1 + 11, cntBuf, 5);
+    if(!pumpOverride){
+      memset(line0, ' ', 16);
+      line0[16] = '\0';
+      if (cycleSeconds < pumpOn) {
+        memcpy(line0, "Pump off: ", 10);
+        formatCountdown(pumpOn - cycleSeconds, cntBuf, sizeof(cntBuf));
+        memcpy(line0 + 10, cntBuf, 5);
+      } else {
+        memcpy(line0, "Pump on:  ", 10);
+        formatCountdown(pumpCycle - cycleSeconds, cntBuf, sizeof(cntBuf));
+        memcpy(line0 + 10, cntBuf, 5);
+      }
     }
     else{
-      memcpy(line1, "Light on:  ", 11);
-      long t = lightOn < totalSeconds ? 86400 + lightOn - totalSeconds : lightOn - totalSeconds;
-      formatCountdown(t, cntBuf, sizeof(cntBuf));
-      memcpy(line1 + 11, cntBuf, 5);
+      snprintf(line0, sizeof(line0), "Pump override");
+    }
+
+    if(!lightOverride){
+      memset(line1, ' ', 16);
+      line1[16] = '\0';
+      if(daySeconds >= lightOn && daySeconds < lightOff){
+        memcpy(line1, "Light off: ", 11);
+        formatCountdown(lightOff - daySeconds, cntBuf, sizeof(cntBuf));
+        memcpy(line1 + 11, cntBuf, 5);
+      }
+      else{
+        memcpy(line1, "Light on:  ", 11);
+        long t = lightOn < daySeconds ? 86400 + lightOn - daySeconds : lightOn - daySeconds;
+        formatCountdown(t, cntBuf, sizeof(cntBuf));
+        memcpy(line1 + 11, cntBuf, 5);
+      }
+    }
+    else{
+      snprintf(line1, sizeof(line0), "Light override");
     }
 
     lcd.clear();
