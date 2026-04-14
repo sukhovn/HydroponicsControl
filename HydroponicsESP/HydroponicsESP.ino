@@ -92,6 +92,31 @@ void sendToSupabase(String jsonPayload, bool debug=false) {
   http.end();
 }
 
+class LoggingConfig {
+public:
+  bool enabled;
+
+  LoggingConfig(): enabled(true) {};
+
+  void load(){
+    Preferences prefs;
+    prefs.begin("logging", true);
+    enabled = prefs.getBool("enabled", enabled);
+    prefs.end();
+  }
+
+  void update(bool _enabled) {
+    enabled = true;
+    debugLog(String("Logging ") + (_enabled ? "ON" : "OFF"));
+
+    enabled = _enabled;
+    Preferences prefs;
+    prefs.begin("logging", false);
+    prefs.putBool("enabled", enabled);
+    prefs.end();
+  }
+} loggingConfig;
+
 void debugLog(String msg){
   StaticJsonDocument<392> doc;
   doc["device"] = "ESP32";
@@ -100,9 +125,11 @@ void debugLog(String msg){
   Serial.println(msg);        // USB serial (when cable connected)
   Serial2.println(msg);       // back to Mega for monitoring
 
-  String payload;
-  serializeJson(doc, payload);
-  sendToSupabase(payload, true);
+  if(loggingConfig.enabled){
+    String payload;
+    serializeJson(doc, payload);
+    sendToSupabase(payload, true);
+  }
 }
 
 // ── Web server ────────────────────────────────────────────────
@@ -225,7 +252,7 @@ bool isAuthorized(AsyncWebServerRequest* req) {
 
 // ── Setup web server routes ────────────────────────────────────
 void setupServer() {
-  // GET /api/relay — read current config
+  // GET /api/relay — read relay config
   server.on("/api/relay", HTTP_GET, [](AsyncWebServerRequest* req) {
     if (!isAuthorized(req)) {
       req->send(401, "application/json", "{\"error\":\"Unauthorized\"}");
@@ -241,7 +268,7 @@ void setupServer() {
     req->send(200, "application/json", resp);
   });
 
-  // POST /api/relay — update pump config
+  // POST /api/relay — update relay config
   // Body: {"pumpOnMinutes": 15, "pumpOffMinutes": 45, "lightOnMinutes": 45, "lightOffMinutes": 45}
   server.on("/api/relay", HTTP_POST,
     [](AsyncWebServerRequest* req) {},   // headers handler (required)
@@ -290,7 +317,7 @@ void setupServer() {
         }
       }
 
-      if (changed) {
+      if(changed){
         relayConfig.sendConfigToMega();
         relayConfig.save();
         StaticJsonDocument<192> resp;
@@ -305,6 +332,90 @@ void setupServer() {
       } else {
         req->send(400, "application/json", "{\"error\":\"No valid fields or values out of range\"}");
       }
+    }
+  );
+
+  // POST /api/logging — switch Supabase logging on/ogg
+  // Body: {"enabled": true}
+  server.on("/api/logging", HTTP_POST, [](AsyncWebServerRequest* req) {},
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t) {
+      if (!isAuthorized(req)) { req->send(401); return; }
+
+      StaticJsonDocument<64> doc;
+      DeserializationError err = deserializeJson(doc, data, len);
+      if(err){
+        req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+      }
+      if(!doc["enabled"].is<bool>()){
+        req->send(400, "application/json", "{\"error\":\"'enabled' must be a boolean\"}");
+        return;
+      }
+
+      loggingConfig.update(doc["enabled"].as<bool>());
+
+      req->send(200, "application/json",
+        loggingConfig.enabled ? "{\"logging\":\"on\"}" : "{\"logging\":\"off\"}");
+    }
+  );
+
+  // POST /api/manual — manual pump/lights override
+  // Body: {"manual": true, "pump": true, "light": true}
+  server.on("/api/manual", HTTP_POST, [](AsyncWebServerRequest* req) {},
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t) {
+      if (!isAuthorized(req)) { req->send(401); return; }
+
+      StaticJsonDocument<192> doc;
+      DeserializationError err = deserializeJson(doc, data, len);
+      if(err){
+        req->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+      }
+
+      if(!doc.containsKey("manual") || !doc["manual"].is<bool>()){
+        req->send(400, "application/json", "{\"error\":\"No boolean 'manual' found\"}");
+        return;
+      }
+
+      StaticJsonDocument<192> cmd;
+      bool manual = doc["manual"].as<bool>();
+      cmd["manual"] = manual;
+
+      if(manual){
+        bool no_manual_command = true;
+        if(doc.containsKey("pump")){
+          no_manual_command = false;
+          if(!doc["pump"].is<bool>()){
+            req->send(400, "application/json", "{\"error\":\"'pump' must be a boolean\"}");
+            return;
+          }
+          cmd["pump"] = doc["pump"].as<bool>();
+        }
+        if(doc.containsKey("light")){
+          no_manual_command = false;
+          if(!doc["light"].is<bool>()){
+            req->send(400, "application/json", "{\"error\":\"'light' must be a boolean\"}");
+            return;
+          }
+          cmd["light"] = doc["light"].as<bool>();
+        }
+        if(no_manual_command){
+          req->send(400, "application/json", "{\"error\":\"Manual override command not found\"}");
+          return;
+        }
+      }
+
+      String cmd_out, req_out;
+      serializeJson(cmd, req_out);
+      cmd["cmd"] = "override";
+      serializeJson(cmd, cmd_out);
+
+      Serial2.println(cmd_out);
+      debugLog("Sent to Mega: " + cmd_out);
+
+      req->send(200, "application/json", req_out);
     }
   );
 
@@ -323,6 +434,8 @@ void setup() {
 
   Serial.println("ESP32 booting...");
   Serial2.println("ESP32 booting...");
+
+  loggingConfig.load();
   connectWiFi();
   debugLog("ESP32 booted");
 
@@ -361,9 +474,11 @@ void loop() {
           if(cmd == "log"){
             doc["device"] = "Mega";
 
-            String payload;
-            serializeJson(doc, payload);
-            sendToSupabase(payload, true);
+            if(loggingConfig.enabled){
+              String payload;
+              serializeJson(doc, payload);
+              sendToSupabase(payload, true);
+            }
           }
           else if(cmd == "configReport"){
             relayConfig.setConfigFromMega(doc);

@@ -157,6 +157,49 @@ class RelayTimer{
   long totalSeconds;
   long cycleSeconds;
 
+  bool pumpOverride;
+  bool lightOverride;
+
+  void switchPumpOn(){
+    digitalWrite(LEG_SHIFT, LOW);
+    if(!pumpIsOn){
+      lcd.init();
+      lcd.backlight();
+      pumpIsOn = true;
+      debugLog("Pump switched on");
+    }
+  }
+
+  void switchPumpOff(){
+    digitalWrite(LEG_SHIFT, HIGH);
+    if(pumpIsOn){
+      lcd.init();
+      lcd.backlight();
+      pumpIsOn = false;
+      debugLog("Pump switched off");
+    }
+  }
+
+  void switchLightOn(){
+    digitalWrite(LEG_SHIFT+1, LOW);
+    if(!lightIsOn){
+      lcd.init();
+      lcd.backlight();
+      lightIsOn = true;
+      debugLog("Light switched on");
+    }
+  }
+
+  void switchLightOff(){
+    digitalWrite(LEG_SHIFT+1, HIGH);
+    if(lightIsOn){
+      lcd.init();
+      lcd.backlight();
+      lightIsOn = false;
+      debugLog("Light switched off");
+    }
+  }
+
   void saveRelayConfig(){
     RelayConfig cfg = {EEPROM_MAGIC, pumpOn, pumpCycle, lightOn, lightOff};
     EEPROM.put(EEPROM_ADDR, cfg);
@@ -165,7 +208,8 @@ class RelayTimer{
 public:
   RelayTimer(long _pumpOn, long _pumpOff, long _lightOn, long _lightOff):
     pumpOn(_pumpOn), pumpCycle(_pumpOn+_pumpOff), lightOn(_lightOn), lightOff(_lightOff),
-    pumpIsOn(false), lightIsOn(false), totalSeconds(0), cycleSeconds(0) {};
+    pumpIsOn(false), lightIsOn(false), totalSeconds(0), cycleSeconds(0),
+    pumpOverride(false), lightOverride(false) {};
 
   void updateRelayConfig(long _pumpOn, long _pumpCycle, long _lightOn, long _lightOff){
     pumpOn = _pumpOn; pumpCycle = _pumpCycle; lightOn = _lightOn; lightOff = _lightOff;
@@ -210,6 +254,7 @@ public:
     RelayConfig cfg;
     EEPROM.get(EEPROM_ADDR, cfg);
 
+    char localBuf[80];
     if(cfg.magic == EEPROM_MAGIC){
       pumpOn = cfg.pumpOn;
       pumpCycle = cfg.pumpCycle;
@@ -220,7 +265,6 @@ public:
       formatCountdown(lightOn, lightOnBuf, sizeof(lightOnBuf));
       formatCountdown(lightOff, lightOffBuf, sizeof(lightOffBuf));
 
-      char localBuf[80];
       snprintf(localBuf, sizeof(localBuf), "Loaded from EEPROM: Pump ON=%ld OFF=%ld | Light ON=%s OFF=%s",
                pumpOn/60, (pumpCycle - pumpOn)/60, lightOnBuf, lightOffBuf);
       debugLog(localBuf);
@@ -253,48 +297,27 @@ public:
       digitalWrite(LEG_SHIFT+1, HIGH);
       lightIsOn = false;
     }
+
+    snprintf(localBuf, sizeof(localBuf), "At reboot Pump %s Light %s", pumpIsOn ? "ON" : "OFF", lightIsOn ? "ON" : "OFF");
+    debugLog(localBuf);
   }
 
   void update(const DateTime &dt){
     totalSeconds = timeFromHMS(dt.hour(), dt.minute(), dt.second());
     cycleSeconds = totalSeconds % pumpCycle;
 
-    if(cycleSeconds < pumpOn){
-      digitalWrite(LEG_SHIFT, LOW);
-      if(!pumpIsOn){
-        lcd.init();
-        lcd.backlight();
-        pumpIsOn = true;
-        debugLog("Pump switched on");
-      }
-    }
-    else{
-      digitalWrite(LEG_SHIFT, HIGH);
-      if(pumpIsOn){
-        lcd.init();
-        lcd.backlight();
-        pumpIsOn = false;
-        debugLog("Pump switched off");
-      }
+    if(!pumpOverride){
+      if(cycleSeconds < pumpOn)
+        switchPumpOn();
+      else
+        switchPumpOff();
     }
 
-    if(totalSeconds >= lightOn && totalSeconds < lightOff){
-      digitalWrite(LEG_SHIFT+1, LOW);
-      if(!lightIsOn){
-        lcd.init();
-        lcd.backlight();
-        lightIsOn = true;
-        debugLog("Light switched on");
-      }
-    }
-    else{
-      digitalWrite(LEG_SHIFT+1, HIGH);
-      if(lightIsOn){
-        lcd.init();
-        lcd.backlight();
-        lightIsOn = false;
-        debugLog("Light switched off");
-      }
+    if(!lightOverride){
+      if(totalSeconds >= lightOn && totalSeconds < lightOff)
+        switchLightOn();
+      else
+        switchLightOff();
     }
   }
 
@@ -332,6 +355,30 @@ public:
     lcd.print(line0);
     lcd.setCursor(0, 1);
     lcd.print(line1);
+  }
+
+  void overridePump(bool pump){
+    pumpOverride = true;
+    debugLog("Pump override ON");
+    if(pump)
+      switchPumpOn();
+    else
+      switchPumpOff();
+  }
+
+  void overrideLight(bool light){
+    lightOverride = true;
+    debugLog("Light override ON");
+    if(light)
+      switchLightOn();
+    else
+      switchLightOff();
+  }
+
+  void overrideOff(){
+    pumpOverride = false;
+    lightOverride = false;
+    debugLog("Relay override OFF");
   }
 
 } relay_timer(900, 2700, timeFromHMS(6,0,0), timeFromHMS(22,0,0));
@@ -472,6 +519,29 @@ void checkESP32Messages() {
         }
         else if(strcmp(cmd, "getConfig") == 0){
           relay_timer.sendConfigReport();
+        }
+        else if(strcmp(cmd, "override") == 0){
+          if(doc.containsKey("manual")){
+            if(doc["manual"].as<bool>()){
+              bool no_manual_command = true;
+              if(doc.containsKey("pump")){
+                no_manual_command = false;
+                relay_timer.overridePump(doc["pump"].as<bool>());
+              }
+              if(doc.containsKey("light")){
+                no_manual_command = false;
+                relay_timer.overrideLight(doc["light"].as<bool>());
+              }
+              if(no_manual_command)
+                debugLog("override missing override command");
+            }
+            else{
+              relay_timer.overrideOff();
+            }
+          }
+          else{
+            debugLog("override missing manual");
+          }
         }
         else{
           char localBuf[80];
