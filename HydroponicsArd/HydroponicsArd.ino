@@ -96,6 +96,15 @@ float readLevel() {
   return (duration * 0.0343f) / 2.0f;
 }
 
+// Generating measurement call for Atlas Scientific sensors
+void ASMeasurementString(char *str, size_t len, float temp){
+  if(temp < -99.9f) temp = -99.9f;
+  if(temp >  999.9f) temp = 999.9f;
+  char buffer1[8];
+  dtostrf(temp, 0, 1, buffer1);
+  snprintf(str, len, "RT,%s\r", buffer1);
+}
+
 // Storing water level to DS1307 SRAM
 #define DS1307_ADDR 0x68
 #define SRAM_FLAG_ADDR  0 // Flag (1 = valid data saved, 0 = no data saved)
@@ -401,7 +410,7 @@ public:
 
 // Measurement code
 class Measurements{
-  long databaseSaveInverval;
+  long databaseSaveInterval;
   long levelMeasureCooldown;
   uint32_t lastSave;
 
@@ -410,6 +419,8 @@ class Measurements{
   float ph;
   float ec;
 
+  bool readPH;
+  bool readEC;
   bool waterLevelFrozen;
 
   void sendReading(){
@@ -430,13 +441,16 @@ class Measurements{
   }
 
 public:
-  Measurements(long _databaseSaveInverval, long _levelMeasureCooldown): databaseSaveInverval(_databaseSaveInverval),
-    levelMeasureCooldown(_levelMeasureCooldown), lastSave(0), waterTemp(0), waterLevel(-1.0f), ph(7), ec(1),
-    waterLevelFrozen(false) {}
+  Measurements(long _databaseSaveInterval, long _levelMeasureCooldown)
+    : databaseSaveInterval(_databaseSaveInterval),
+      levelMeasureCooldown(_levelMeasureCooldown), lastSave(0), waterTemp(0), waterLevel(-1.0f), ph(7), ec(1),
+      readPH(false), readEC(false), waterLevelFrozen(false) {}
 
   void setLastMeasurement(const DateTime &dt){
     lastSave = dt.unixtime();
   }
+
+  float getWaterTemp() const {return waterTemp;}
 
   void recoverWaterLevel(){
     if(ds1307_read_byte(SRAM_FLAG_ADDR) == 1){
@@ -463,10 +477,24 @@ public:
       waterLevelFrozen = true;
     }
 
-    uint32_t timestamp = dt.unixtime();
-    if(timestamp - lastSave >= databaseSaveInverval){
+    long saveTimer = (long)(dt.unixtime() - lastSave) - databaseSaveInterval;
+    if(saveTimer >= -4 && !readPH){
+      char buffer1[16];
+      ASMeasurementString(buffer1, sizeof(buffer1), waterTemp);
+      Serial2.print(buffer1);
+      readPH = true;
+    }
+    if(saveTimer >= -2 && !readEC){
+      char buffer1[16];
+      ASMeasurementString(buffer1, sizeof(buffer1), waterTemp);
+      Serial3.print(buffer1);
+      readEC = true;
+    }
+    if(saveTimer >= 0){
       sendReading();
-      lastSave = timestamp;
+      lastSave = dt.unixtime();
+      readPH = false;
+      readEC = false;
     }
   }
 
@@ -480,7 +508,7 @@ public:
       }
     }
 
-    if (Serial3.available()) {
+    if(Serial3.available()){
       int len = Serial3.readBytesUntil('\r', serialBuffer, sizeof(serialBuffer) - 1);
       serialBuffer[len] = '\0';
       if(isValidFloat(serialBuffer)){
@@ -620,12 +648,15 @@ void setup() {
   Serial2.begin(9600);
   Serial3.begin(9600);
 
-  // Setting water level after reset
+  // Setting water level and reading temperature after reset
   measurements.recoverWaterLevel();
   measurements.update(dt);
 
-  Serial2.print(F("R\r"));
-  Serial3.print(F("R\r"));
+  // Reading pH and EC after reset
+  char buffer1[16];
+  ASMeasurementString(buffer1, sizeof(buffer1), measurements.getWaterTemp());
+  Serial2.print(buffer1);
+  Serial3.print(buffer1);
 
   // Letting everything boot
   delay(1000);
