@@ -6,6 +6,8 @@
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
 
+#include "html_code.h"
+
 // ── WiFi credentials ──────────────────────────────────────────
 #include "passwords.h"
 
@@ -135,38 +137,41 @@ void debugLog(String msg){
 // ── Web server ────────────────────────────────────────────────
 AsyncWebServer server(80);
 
-// ── Pump config (mirrors what Mega holds) ─────────────────────
-struct RelayConfig {
+// ── Controller config (mirrors what Mega holds) ─────────────────────
+struct ControlConfig {
 public:
   long pumpOn;
   long pumpCycle;
   long lightOn;
   long lightOff;
+  long readingInt;
 
-  RelayConfig(): pumpOn(900), pumpCycle(3600), lightOn(6*3600L), lightOff(22*3600L) {};
+  ControlConfig(): pumpOn(900), pumpCycle(3600), lightOn(6*3600L), lightOff(22*3600L), readingInt(60) {};
 
   void save() {
     Preferences prefs;
-    prefs.begin("relay", false);
-    prefs.putLong("pumpOn",    pumpOn);
-    prefs.putLong("pumpCycle", pumpCycle);
-    prefs.putLong("lightOn",   lightOn);
-    prefs.putLong("lightOff",  lightOff);
+    prefs.begin("control", false);
+    prefs.putLong("pumpOn",     pumpOn);
+    prefs.putLong("pumpCycle",  pumpCycle);
+    prefs.putLong("lightOn",    lightOn);
+    prefs.putLong("lightOff",   lightOff);
+    prefs.putLong("readingInt", readingInt);
     prefs.end();
 
     debugLog("Saved config settings: Pump ON=" + String(pumpOn/60) +
              " OFF=" + String((pumpCycle-pumpOn)/60) +
              " | Light ON=" + formatCountdown(lightOn) +
-             " OFF=" + formatCountdown(lightOff));
+             " OFF=" + formatCountdown(lightOff) + " | ReadingInt=" + String(readingInt));
   }
 
   void load() {
     Preferences prefs;
-    prefs.begin("relay", true);
+    prefs.begin("control", true);
     pumpOn  = prefs.getLong("pumpOn",   pumpOn);
     pumpCycle = prefs.getLong("pumpCycle",  pumpCycle);
     lightOn  = prefs.getLong("lightOn",  lightOn);
     lightOff = prefs.getLong("lightOff", lightOff);
+    readingInt = prefs.getLong("readingInt", readingInt);
     prefs.end();
 
     Serial2.println("{\"cmd\":\"getConfig\"}");
@@ -175,11 +180,12 @@ public:
 
   void sendConfigToMega() {
     StaticJsonDocument<192> cmd;
-    cmd["cmd"]       = "setRelay";
+    cmd["cmd"]       = "setConfig";
     cmd["pumpOn"]    = pumpOn;
     cmd["pumpCycle"] = pumpCycle;
     cmd["lightOn"]   = lightOn;
     cmd["lightOff"]  = lightOff;
+    cmd["readingInt"] = readingInt;
     String out;
     serializeJson(cmd, out);
     Serial2.println(out);
@@ -187,31 +193,35 @@ public:
   }
 
   void setConfigFromMega(const JsonDocument &doc){
-    if(doc.containsKey("pumpOn") && doc.containsKey("pumpCycle") && doc.containsKey("lightOn") && doc.containsKey("lightOff")){
+    if(doc.containsKey("pumpOn") && doc.containsKey("pumpCycle") &&
+       doc.containsKey("lightOn") && doc.containsKey("lightOff") && doc.containsKey("readingInt")){
       long pumpOnTemp = doc["pumpOn"].as<long>();
       long pumpCycleTemp = doc["pumpCycle"].as<long>();
       long lightOnTemp = doc["lightOn"].as<long>();
       long lightOffTemp = doc["lightOff"].as<long>();
+      long readingIntTemp = doc["readingInt"].as<long>();
 
       String out;
       serializeJson(doc, out);
-      debugLog("Received relay config from Mega: " + out);
+      debugLog("Received controller config from Mega: " + out);
 
-      if(pumpOnTemp != pumpOn || pumpCycleTemp != pumpCycle || lightOnTemp != lightOn || lightOffTemp != lightOff){
+      if(pumpOnTemp != pumpOn || pumpCycleTemp != pumpCycle ||
+         lightOnTemp != lightOn || lightOffTemp != lightOff || readingIntTemp != readingInt){
         pumpOn = pumpOnTemp;
         pumpCycle = pumpCycleTemp;
         lightOn = lightOnTemp;
         lightOff = lightOffTemp;
+        readingInt = readingIntTemp;
         save();
       }
     }
     else{
       String out;
       serializeJson(doc, out);
-      debugLog("Relay config from Mega is missing fields: " + out);
+      debugLog("Controller config from Mega is missing fields: " + out);
     }
   }
-} relayConfig;
+} controlConfig;
 
 // ── Rate limiting (brute-force protection) ────────────────────
 struct RateLimit {
@@ -252,25 +262,35 @@ bool isAuthorized(AsyncWebServerRequest* req) {
 
 // ── Setup web server routes ────────────────────────────────────
 void setupServer() {
-  // GET /api/relay — read relay config
-  server.on("/api/relay", HTTP_GET, [](AsyncWebServerRequest* req) {
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "X-API-Key, Content-Type");
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+
+  // GET / — serve dashboard
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+    req->send_P(200, "text/html", DASHBOARD_HTML);
+  });
+
+  // GET /api/control — read controller config
+  server.on("/api/control", HTTP_GET, [](AsyncWebServerRequest* req) {
     if (!isAuthorized(req)) {
       req->send(401, "application/json", "{\"error\":\"Unauthorized\"}");
       return;
     }
     StaticJsonDocument<192> doc;
-    doc["pumpOnMinutes"]  = (long) relayConfig.pumpOn/60;
-    doc["pumpOffMinutes"] = (long) (relayConfig.pumpCycle - relayConfig.pumpOn)/60;
-    doc["lightOnMinutes"] = (long) relayConfig.lightOn/60;
-    doc["lightOffMinutes"] = (long) relayConfig.lightOff/60;
+    doc["pumpOnMinutes"]  = (long) controlConfig.pumpOn/60;
+    doc["pumpOffMinutes"] = (long) (controlConfig.pumpCycle - controlConfig.pumpOn)/60;
+    doc["lightOnMinutes"] = (long) controlConfig.lightOn/60;
+    doc["lightOffMinutes"] = (long) controlConfig.lightOff/60;
+    doc["readingInterval"] = (long) controlConfig.readingInt;
     String resp;
     serializeJson(doc, resp);
     req->send(200, "application/json", resp);
   });
 
-  // POST /api/relay — update relay config
-  // Body: {"pumpOnMinutes": 15, "pumpOffMinutes": 45, "lightOnMinutes": 45, "lightOffMinutes": 45}
-  server.on("/api/relay", HTTP_POST,
+  // POST /api/control — update control config
+  // Body: {"pumpOnMinutes": 15, "pumpOffMinutes": 45, "lightOnMinutes": 360, "lightOffMinutes": 1320, "readingInterval": 60}
+  server.on("/api/control", HTTP_POST,
     [](AsyncWebServerRequest* req) {},   // headers handler (required)
     nullptr,
     [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t) {
@@ -290,42 +310,50 @@ void setupServer() {
       if (doc.containsKey("pumpOnMinutes")) {
         long v = doc["pumpOnMinutes"].as<long>();
         if (v >= 1 && v <= 120) {
-          relayConfig.pumpCycle = relayConfig.pumpCycle - relayConfig.pumpOn + 60*v;
-          relayConfig.pumpOn = 60*v;
+          controlConfig.pumpCycle = controlConfig.pumpCycle - controlConfig.pumpOn + 60*v;
+          controlConfig.pumpOn = 60*v;
           changed = true;
         }
       }
       if (doc.containsKey("pumpOffMinutes")) {
         long v = doc["pumpOffMinutes"].as<long>();
         if (v >= 1 && v <= 240) {
-          relayConfig.pumpCycle = relayConfig.pumpOn + 60*v;
+          controlConfig.pumpCycle = controlConfig.pumpOn + 60*v;
           changed = true;
         }
       }
       if (doc.containsKey("lightOnMinutes")) {
         long v = doc["lightOnMinutes"].as<long>();
         if (v >= 0 && v < 1440) {
-          relayConfig.lightOn = 60*v;
+          controlConfig.lightOn = 60*v;
           changed = true;
         }
       }
       if (doc.containsKey("lightOffMinutes")) {
         long v = doc["lightOffMinutes"].as<long>();
         if (v >= 0 && v < 1440) {
-          relayConfig.lightOff = 60*v;
+          controlConfig.lightOff = 60*v;
+          changed = true;
+        }
+      }
+      if (doc.containsKey("readingInterval")) {
+        long v = doc["readingInterval"].as<long>();
+        if (v >= 5) {
+          controlConfig.readingInt = v;
           changed = true;
         }
       }
 
       if(changed){
-        relayConfig.sendConfigToMega();
-        relayConfig.save();
+        controlConfig.sendConfigToMega();
+        controlConfig.save();
         StaticJsonDocument<192> resp;
         resp["status"]     = "ok";
-        resp["pumpOnMinutes"]  = (long) relayConfig.pumpOn/60;
-        resp["pumpCycleMinutes"] = (long) (relayConfig.pumpCycle - relayConfig.pumpOn)/60;
-        resp["lightOnMinutes"] = (long) relayConfig.lightOn/60;
-        resp["lightOffMinutes"] = (long) relayConfig.lightOff/60;
+        resp["pumpOnMinutes"]  = (long) controlConfig.pumpOn/60;
+        resp["pumpCycleMinutes"] = (long) (controlConfig.pumpCycle - controlConfig.pumpOn)/60;
+        resp["lightOnMinutes"] = (long) controlConfig.lightOn/60;
+        resp["lightOffMinutes"] = (long) controlConfig.lightOff/60;
+        resp["readingInterval"] = (long) controlConfig.readingInt;
         String respStr;
         serializeJson(resp, respStr);
         req->send(200, "application/json", respStr);
@@ -421,7 +449,11 @@ void setupServer() {
 
   // 404 handler
   server.onNotFound([](AsyncWebServerRequest* req) {
-    req->send(404, "application/json", "{\"error\":\"Not found\"}");
+    if (req->method() == HTTP_OPTIONS) {
+      req->send(200);
+    } else {
+      req->send(404, "application/json", "{\"error\":\"Not found\"}");
+    }
   });
 
   server.begin();
@@ -443,7 +475,7 @@ void setup() {
     debugLog("mDNS: hydrotower.local");
   }
 
-  relayConfig.load();
+  controlConfig.load();
   setupServer();
 }
 
@@ -481,7 +513,7 @@ void loop() {
             }
           }
           else if(cmd == "configReport"){
-            relayConfig.setConfigFromMega(doc);
+            controlConfig.setConfigFromMega(doc);
           }
           else if(cmd == "reading"){
             String payload;

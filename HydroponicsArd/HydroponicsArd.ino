@@ -15,14 +15,6 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 #define EEPROM_ADDR 0
 #define EEPROM_MAGIC 0xAB  // sentinel to detect valid data
 
-struct RelayConfig{
-  uint8_t magic;
-  long pumpOn;
-  long pumpCycle;
-  long lightOn;
-  long lightOff;
-};
-
 // Button and pump leg shift parameters
 #define BUTTON_1 28
 #define LEG_SHIFT 30
@@ -154,12 +146,78 @@ void debugLog(const char* msg) {
   }
 }
 
-// Timer code
-class RelayTimer{
+// Controller config class
+struct Config{
+  uint8_t magic;
   long pumpOn;
   long pumpCycle;
   long lightOn;
   long lightOff;
+  long readingInterval;
+
+public:
+  void save(){
+    EEPROM.put(EEPROM_ADDR, *this);
+  }
+
+public:
+  // Clecking if config is in EEPROM and loading it
+  void load(){
+    EEPROM.get(EEPROM_ADDR, *this);
+
+    char localBuf[90];
+    if(magic == EEPROM_MAGIC){
+      char lightOnBuf[6], lightOffBuf[6];
+      formatCountdown(lightOn, lightOnBuf, sizeof(lightOnBuf));
+      formatCountdown(lightOff, lightOffBuf, sizeof(lightOffBuf));
+
+      snprintf(localBuf, sizeof(localBuf), "Loaded from EEPROM: Pump ON=%ld OFF=%ld | Light ON=%s OFF=%s | ReadingInt=%ld",
+               pumpOn/60, (pumpCycle - pumpOn)/60, lightOnBuf, lightOffBuf, readingInterval);
+      debugLog(localBuf);
+    }
+    else{
+      debugLog("No valid EEPROM data, using defaults");
+      save();
+    }
+  }
+
+  void updateConfig(long _pumpOn, long _pumpCycle, long _lightOn, long _lightOff, long _readingInterval){
+    pumpOn = _pumpOn; pumpCycle = _pumpCycle; lightOn = _lightOn; lightOff = _lightOff;
+    readingInterval = _readingInterval;
+    save();
+
+    char lightOnBuf[6], lightOffBuf[6];
+    formatCountdown(lightOn, lightOnBuf, sizeof(lightOnBuf));
+    formatCountdown(lightOff, lightOffBuf, sizeof(lightOffBuf));
+
+    char localBuf[90];
+    snprintf(localBuf, sizeof(localBuf), "Config updated: Pump ON=%ld OFF=%ld | Light ON=%s OFF=%s | ReadingInt=%ld",
+             pumpOn/60, (pumpCycle - pumpOn)/60, lightOnBuf, lightOffBuf, readingInterval);
+    debugLog(localBuf);
+  }
+
+  void sendReport(){
+    doc.clear();
+    doc["cmd"]       = "configReport";
+    doc["pumpOn"]    = pumpOn;
+    doc["pumpCycle"] = pumpCycle;
+    doc["lightOn"]   = lightOn;
+    doc["lightOff"]  = lightOff;
+    doc["readingInt"]  = readingInterval;
+
+    serializeJson(doc, serialESPBuffer, sizeof(serialESPBuffer));
+    Serial1.println(serialESPBuffer);
+
+    Serial.print("Sent configReport to ESP32: ");
+    Serial.println(serialESPBuffer);
+  }
+} config({EEPROM_MAGIC, 900, 3600, timeFromHMS(6,0,0), timeFromHMS(22,0,0), 60});
+
+static_assert(__is_trivially_copyable(Config), "Config must be trivially copyable for EEPROM.put");
+
+// Timer code
+class RelayTimer{
+  const Config &cfg;
 
   bool pumpIsOn;
   bool lightIsOn;
@@ -212,45 +270,10 @@ class RelayTimer{
     }
   }
 
-  void saveRelayConfig(){
-    RelayConfig cfg = {EEPROM_MAGIC, pumpOn, pumpCycle, lightOn, lightOff};
-    EEPROM.put(EEPROM_ADDR, cfg);
-  }
-
 public:
-  RelayTimer(long _pumpOn, long _pumpOff, long _lightOn, long _lightOff):
-    pumpOn(_pumpOn), pumpCycle(_pumpOn+_pumpOff), lightOn(_lightOn), lightOff(_lightOff),
+  RelayTimer(const Config &_cfg): cfg(_cfg),
     pumpIsOn(false), lightIsOn(false), totalSeconds(0), daySeconds(0), cycleSeconds(0),
     pumpOffTime(0), pumpOverride(false), lightOverride(false) {};
-
-  void updateRelayConfig(long _pumpOn, long _pumpCycle, long _lightOn, long _lightOff){
-    pumpOn = _pumpOn; pumpCycle = _pumpCycle; lightOn = _lightOn; lightOff = _lightOff;
-    saveRelayConfig();
-
-    char lightOnBuf[6], lightOffBuf[6];
-    formatCountdown(lightOn, lightOnBuf, sizeof(lightOnBuf));
-    formatCountdown(lightOff, lightOffBuf, sizeof(lightOffBuf));
-
-    char localBuf[80];
-    snprintf(localBuf, sizeof(localBuf), "Relay config updated: Pump ON=%ld OFF=%ld | Light ON=%s OFF=%s",
-             pumpOn/60, (pumpCycle - pumpOn)/60, lightOnBuf, lightOffBuf);
-    debugLog(localBuf);
-  }
-
-  void sendConfigReport() {
-    doc.clear();
-    doc["cmd"]       = "configReport";
-    doc["pumpOn"]    = pumpOn;
-    doc["pumpCycle"] = pumpCycle;
-    doc["lightOn"]   = lightOn;
-    doc["lightOff"]  = lightOff;
-
-    serializeJson(doc, serialESPBuffer, sizeof(serialESPBuffer));
-    Serial1.println(serialESPBuffer);
-
-    Serial.print("Sent configReport to ESP32: ");
-    Serial.println(serialESPBuffer);
-  }
 
   bool isPumpOn() const {return pumpIsOn;}
   bool isLightOn() const {return lightIsOn;}
@@ -262,48 +285,24 @@ public:
   }
 
   void setup(const DateTime &dt){
-    // Clecking if relay config is in EEPROM and loading it
-    RelayConfig cfg;
-    EEPROM.get(EEPROM_ADDR, cfg);
-
-    char localBuf[80];
-    if(cfg.magic == EEPROM_MAGIC){
-      pumpOn = cfg.pumpOn;
-      pumpCycle = cfg.pumpCycle;
-      lightOn = cfg.lightOn;
-      lightOff = cfg.lightOff;
-
-      char lightOnBuf[6], lightOffBuf[6];
-      formatCountdown(lightOn, lightOnBuf, sizeof(lightOnBuf));
-      formatCountdown(lightOff, lightOffBuf, sizeof(lightOffBuf));
-
-      snprintf(localBuf, sizeof(localBuf), "Loaded from EEPROM: Pump ON=%ld OFF=%ld | Light ON=%s OFF=%s",
-               pumpOn/60, (pumpCycle - pumpOn)/60, lightOnBuf, lightOffBuf);
-      debugLog(localBuf);
-    }
-    else{
-      debugLog("No valid EEPROM data, using defaults");
-      saveRelayConfig();
-    }
-
     // Setting up initial relay configuration
     totalSeconds = dt.unixtime();
     daySeconds = totalSeconds % 86400;
-    cycleSeconds = totalSeconds % pumpCycle;
+    cycleSeconds = totalSeconds % cfg.pumpCycle;
 
     pinMode(LEG_SHIFT, OUTPUT);
-    if(cycleSeconds < pumpOn){
+    if(cycleSeconds < cfg.pumpOn){
       digitalWrite(LEG_SHIFT, LOW);
       pumpIsOn = true;
     }
     else{
       digitalWrite(LEG_SHIFT, HIGH);
       pumpIsOn = false;
-      pumpOffTime = (totalSeconds/pumpCycle)*pumpCycle + pumpOn;
+      pumpOffTime = (totalSeconds/cfg.pumpCycle)*cfg.pumpCycle + cfg.pumpOn;
     }
 
     pinMode(LEG_SHIFT+1, OUTPUT);
-    if(daySeconds >= lightOn && daySeconds < lightOff){
+    if(daySeconds >= cfg.lightOn && daySeconds < cfg.lightOff){
       digitalWrite(LEG_SHIFT+1, LOW);
       lightIsOn = true;
     }
@@ -312,6 +311,7 @@ public:
       lightIsOn = false;
     }
 
+    char localBuf[80];
     snprintf(localBuf, sizeof(localBuf), "At reboot Pump %s Light %s", pumpIsOn ? "ON" : "OFF", lightIsOn ? "ON" : "OFF");
     debugLog(localBuf);
   }
@@ -319,17 +319,17 @@ public:
   void update(const DateTime &dt){
     totalSeconds = dt.unixtime();
     daySeconds = totalSeconds % 86400;
-    cycleSeconds = totalSeconds % pumpCycle;
+    cycleSeconds = totalSeconds % cfg.pumpCycle;
 
     if(!pumpOverride){
-      if(cycleSeconds < pumpOn)
+      if(cycleSeconds < cfg.pumpOn)
         switchPumpOn();
       else
         switchPumpOff();
     }
 
     if(!lightOverride){
-      if(daySeconds >= lightOn && daySeconds < lightOff)
+      if(daySeconds >= cfg.lightOn && daySeconds < cfg.lightOff)
         switchLightOn();
       else
         switchLightOff();
@@ -342,13 +342,13 @@ public:
     if(!pumpOverride){
       memset(line0, ' ', 16);
       line0[16] = '\0';
-      if (cycleSeconds < pumpOn) {
+      if (cycleSeconds < cfg.pumpOn) {
         memcpy(line0, "Pump off: ", 10);
-        formatCountdown(pumpOn - cycleSeconds, cntBuf, sizeof(cntBuf));
+        formatCountdown(cfg.pumpOn - cycleSeconds, cntBuf, sizeof(cntBuf));
         memcpy(line0 + 10, cntBuf, 5);
       } else {
         memcpy(line0, "Pump on:  ", 10);
-        formatCountdown(pumpCycle - cycleSeconds, cntBuf, sizeof(cntBuf));
+        formatCountdown(cfg.pumpCycle - cycleSeconds, cntBuf, sizeof(cntBuf));
         memcpy(line0 + 10, cntBuf, 5);
       }
     }
@@ -359,14 +359,14 @@ public:
     if(!lightOverride){
       memset(line1, ' ', 16);
       line1[16] = '\0';
-      if(daySeconds >= lightOn && daySeconds < lightOff){
+      if(daySeconds >= cfg.lightOn && daySeconds < cfg.lightOff){
         memcpy(line1, "Light off: ", 11);
-        formatCountdown(lightOff - daySeconds, cntBuf, sizeof(cntBuf));
+        formatCountdown(cfg.lightOff - daySeconds, cntBuf, sizeof(cntBuf));
         memcpy(line1 + 11, cntBuf, 5);
       }
       else{
         memcpy(line1, "Light on:  ", 11);
-        long t = lightOn < daySeconds ? 86400 + lightOn - daySeconds : lightOn - daySeconds;
+        long t = cfg.lightOn < daySeconds ? 86400 + cfg.lightOn - daySeconds : cfg.lightOn - daySeconds;
         formatCountdown(t, cntBuf, sizeof(cntBuf));
         memcpy(line1 + 11, cntBuf, 5);
       }
@@ -406,11 +406,11 @@ public:
     debugLog("Relay override OFF");
   }
 
-} relay_timer(900, 2700, timeFromHMS(6,0,0), timeFromHMS(22,0,0));
+} relay_timer(config);
 
 // Measurement code
 class Measurements{
-  long databaseSaveInterval;
+  const Config &cfg;
   long levelMeasureCooldown;
   uint32_t lastSave;
 
@@ -441,8 +441,7 @@ class Measurements{
   }
 
 public:
-  Measurements(long _databaseSaveInterval, long _levelMeasureCooldown)
-    : databaseSaveInterval(_databaseSaveInterval),
+  Measurements(const Config &_cfg, long _levelMeasureCooldown): cfg(_cfg),
       levelMeasureCooldown(_levelMeasureCooldown), lastSave(0), waterTemp(0), waterLevel(-1.0f), ph(7), ec(1),
       readPH(false), readEC(false), waterLevelFrozen(false) {}
 
@@ -477,7 +476,9 @@ public:
       waterLevelFrozen = true;
     }
 
-    long saveTimer = (long)(dt.unixtime() - lastSave) - databaseSaveInterval;
+    uint32_t now = dt.unixtime();
+    if(now < lastSave) lastSave = now;  // guard against RTC glitch
+    long saveTimer = (long)(now - lastSave) - cfg.readingInterval;
     if(saveTimer >= -4 && !readPH){
       char buffer1[16];
       ASMeasurementString(buffer1, sizeof(buffer1), waterTemp);
@@ -492,7 +493,7 @@ public:
     }
     if(saveTimer >= 0){
       sendReading();
-      lastSave = dt.unixtime();
+      lastSave = now;
       readPH = false;
       readEC = false;
     }
@@ -539,7 +540,7 @@ public:
     lcd.setCursor(0, 1);
     lcd.print(line1);
   }
-} measurements(60, 30);
+} measurements(config, 30);
 
 // ESP32 receiver function
 void checkESP32Messages() {
@@ -552,17 +553,17 @@ void checkESP32Messages() {
     if(!err){
       if(doc.containsKey("cmd")){
         const char* cmd = doc["cmd"];
-        if(strcmp(cmd, "setRelay") == 0){
-          if(doc.containsKey("pumpOn") && doc.containsKey("pumpCycle") && doc.containsKey("lightOn") && doc.containsKey("lightOff")){
-            relay_timer.updateRelayConfig(doc["pumpOn"].as<long>(), doc["pumpCycle"].as<long>(),
-                                          doc["lightOn"].as<long>(), doc["lightOff"].as<long>());
+        if(strcmp(cmd, "setConfig") == 0){
+          if(doc.containsKey("pumpOn") && doc.containsKey("pumpCycle") && doc.containsKey("lightOn") && doc.containsKey("lightOff") && doc.containsKey("readingInt")){
+            config.updateConfig(doc["pumpOn"].as<long>(), doc["pumpCycle"].as<long>(),
+                                doc["lightOn"].as<long>(), doc["lightOff"].as<long>(), doc["readingInt"].as<long>());
           }
           else{
-            debugLog("setRelay missing fields");
+            debugLog("setConfig missing fields");
           }
         }
         else if(strcmp(cmd, "getConfig") == 0){
-          relay_timer.sendConfigReport();
+          config.sendReport();
         }
         else if(strcmp(cmd, "override") == 0){
           if(doc.containsKey("manual")){
@@ -625,6 +626,9 @@ void setup() {
     debugLog("RTC not running, setting time...");
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
+
+  config.load();
+
   DateTime dt = rtc.now();
   last_second = dt.second();
   measurements.setLastMeasurement(dt);
