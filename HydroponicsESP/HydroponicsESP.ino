@@ -7,21 +7,14 @@
 #include <ESPmDNS.h>
 
 #include "html_code.h"
-
-// ── WiFi credentials ──────────────────────────────────────────
 #include "passwords.h"
 
-
-// ── Supabase credentials ──────────────────────────────────────
+// ── Supabase URLs ──────────────────────────────────────
 const char* supabaseUrl = "https://nyinrfhjksqaludvlvdj.supabase.co/rest/v1/readings";
 const char* supabaseUrlDebug = "https://nyinrfhjksqaludvlvdj.supabase.co/rest/v1/debug";
 
-
 // ── State ─────────────────────────────────────────────────────
 String incomingBuffer = "";
-
-// ── API security ──────────────────────────────────────────────
-
 
 String formatCountdown(long secs) {
     char buf[6];

@@ -372,7 +372,7 @@ public:
       }
     }
     else{
-      snprintf(line1, sizeof(line0), "Light override");
+      snprintf(line1, sizeof(line1), "Light override");
     }
 
     lcd.clear();

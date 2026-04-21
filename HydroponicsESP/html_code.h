@@ -1,3 +1,6 @@
+#ifndef HTML_CODE_H
+#define HTML_CODE_H
+
 const char DASHBOARD_HTML[] PROGMEM = R"==(
 <!DOCTYPE html>
 <html lang="en">
@@ -401,3 +404,5 @@ const char DASHBOARD_HTML[] PROGMEM = R"==(
 </body>
 </html>
 )==";
+
+#endif
