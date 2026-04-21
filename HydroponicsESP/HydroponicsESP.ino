@@ -68,16 +68,14 @@ void sendToSupabase(String jsonPayload, bool debug=false) {
   int responseCode = http.POST(jsonPayload);
 
   if (responseCode == 201) {
-    if(debug){
+    if(debug)
       Serial.println("Supabase debug sent " + jsonPayload);
-      Serial2.println("Supabase debug sent " + jsonPayload);
-    }
     else
       debugLog("Supabase reading sent");
   } else {
     String msg = "Supabase error: " + String(responseCode);
     if(debug){
-      Serial.println(msg);        // USB serial (when cable connected)
+      Serial.println(msg);
       Serial2.println(msg);
     }
     else
@@ -118,7 +116,6 @@ void debugLog(String msg){
   doc["message"] = msg;
 
   Serial.println(msg);        // USB serial (when cable connected)
-  Serial2.println(msg);       // back to Mega for monitoring
 
   if(loggingConfig.enabled){
     String payload;
@@ -141,7 +138,12 @@ public:
 
   ControlConfig(): pumpOn(900), pumpCycle(3600), lightOn(6*3600L), lightOff(22*3600L), readingInt(60) {};
 
-  void save() {
+  bool operator==(const ControlConfig &cfg) const{
+    return (pumpOn == cfg.pumpOn) && (pumpCycle == cfg.pumpCycle) && (lightOn == cfg.lightOn)
+            && (lightOff == cfg.lightOff) && (readingInt == cfg.readingInt);
+  }
+
+  void save() const{
     Preferences prefs;
     prefs.begin("control", false);
     prefs.putLong("pumpOn",     pumpOn);
@@ -157,7 +159,7 @@ public:
              " OFF=" + formatCountdown(lightOff) + " | ReadingInt=" + String(readingInt));
   }
 
-  void load() {
+  void load(){
     Preferences prefs;
     prefs.begin("control", true);
     pumpOn  = prefs.getLong("pumpOn",   pumpOn);
@@ -171,7 +173,7 @@ public:
     debugLog("Requested config from Mega");
   }
 
-  void sendConfigToMega() {
+  void sendConfigToMega() const{
     StaticJsonDocument<192> cmd;
     cmd["cmd"]       = "setConfig";
     cmd["pumpOn"]    = pumpOn;
@@ -300,53 +302,54 @@ void setupServer() {
       }
 
       bool changed = false;
+      ControlConfig configTmp(controlConfig);
       if (doc.containsKey("pumpOnMinutes")) {
         long v = doc["pumpOnMinutes"].as<long>();
         if (v >= 1 && v <= 120) {
-          controlConfig.pumpCycle = controlConfig.pumpCycle - controlConfig.pumpOn + 60*v;
-          controlConfig.pumpOn = 60*v;
+          configTmp.pumpCycle = configTmp.pumpCycle - configTmp.pumpOn + 60*v;
+          configTmp.pumpOn = 60*v;
           changed = true;
         }
       }
       if (doc.containsKey("pumpOffMinutes")) {
         long v = doc["pumpOffMinutes"].as<long>();
         if (v >= 1 && v <= 240) {
-          controlConfig.pumpCycle = controlConfig.pumpOn + 60*v;
+          configTmp.pumpCycle = configTmp.pumpOn + 60*v;
           changed = true;
         }
       }
       if (doc.containsKey("lightOnMinutes")) {
         long v = doc["lightOnMinutes"].as<long>();
         if (v >= 0 && v < 1440) {
-          controlConfig.lightOn = 60*v;
+          configTmp.lightOn = 60*v;
           changed = true;
         }
       }
       if (doc.containsKey("lightOffMinutes")) {
         long v = doc["lightOffMinutes"].as<long>();
         if (v >= 0 && v < 1440) {
-          controlConfig.lightOff = 60*v;
+          configTmp.lightOff = 60*v;
           changed = true;
         }
       }
       if (doc.containsKey("readingInterval")) {
         long v = doc["readingInterval"].as<long>();
         if (v >= 5) {
-          controlConfig.readingInt = v;
+          configTmp.readingInt = v;
           changed = true;
         }
       }
 
       if(changed){
-        controlConfig.sendConfigToMega();
-        controlConfig.save();
+        if(!(configTmp == controlConfig))
+          configTmp.sendConfigToMega();
         StaticJsonDocument<192> resp;
         resp["status"]     = "ok";
-        resp["pumpOnMinutes"]  = (long) controlConfig.pumpOn/60;
-        resp["pumpCycleMinutes"] = (long) (controlConfig.pumpCycle - controlConfig.pumpOn)/60;
-        resp["lightOnMinutes"] = (long) controlConfig.lightOn/60;
-        resp["lightOffMinutes"] = (long) controlConfig.lightOff/60;
-        resp["readingInterval"] = (long) controlConfig.readingInt;
+        resp["pumpOnMinutes"]  = (long) configTmp.pumpOn/60;
+        resp["pumpCycleMinutes"] = (long) (configTmp.pumpCycle - configTmp.pumpOn)/60;
+        resp["lightOnMinutes"] = (long) configTmp.lightOn/60;
+        resp["lightOffMinutes"] = (long) configTmp.lightOff/60;
+        resp["readingInterval"] = (long) configTmp.readingInt;
         String respStr;
         serializeJson(resp, respStr);
         req->send(200, "application/json", respStr);

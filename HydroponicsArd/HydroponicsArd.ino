@@ -155,8 +155,8 @@ struct Config{
   long lightOff;
   long readingInterval;
 
-public:
-  void save(){
+private:
+  void save() const{
     EEPROM.put(EEPROM_ADDR, *this);
   }
 
@@ -185,6 +185,7 @@ public:
     pumpOn = _pumpOn; pumpCycle = _pumpCycle; lightOn = _lightOn; lightOff = _lightOff;
     readingInterval = _readingInterval;
     save();
+    sendReport();
 
     char lightOnBuf[6], lightOffBuf[6];
     formatCountdown(lightOn, lightOnBuf, sizeof(lightOnBuf));
@@ -196,7 +197,7 @@ public:
     debugLog(localBuf);
   }
 
-  void sendReport(){
+  void sendReport() const{
     doc.clear();
     doc["cmd"]       = "configReport";
     doc["pumpOn"]    = pumpOn;
@@ -336,7 +337,7 @@ public:
     }
   }
 
-  void printStatus(){
+  void printStatus() const{
     char cntBuf[6];
 
     if(!pumpOverride){
@@ -423,7 +424,7 @@ class Measurements{
   bool readEC;
   bool waterLevelFrozen;
 
-  void sendReading(){
+  void sendReading() const{
     doc.clear();
     doc["cmd"] = "reading";
     doc["temp"] = waterTemp;
@@ -461,8 +462,8 @@ public:
   }
 
   void update(const DateTime &dt){
-    tempSensor.requestTemperatures();
     waterTemp = tempSensor.getTempCByIndex(0);
+    tempSensor.requestTemperatures();
     if(relay_timer.timeAfterPumpOff() >= levelMeasureCooldown){
       waterLevel = 24.6 - readLevel(); // Bucket depth with no water as measured by ultrasound is 24.6
       if(waterLevelFrozen){
@@ -519,7 +520,7 @@ public:
     }
   }
 
-  void printStatus(){
+  void printStatus() const{
     char buffer1[6], buffer2[6];
 
     memset(line0, ' ', 16);
@@ -548,6 +549,11 @@ void checkESP32Messages() {
     int len = Serial1.readBytesUntil('\n', serialESPBuffer, sizeof(serialESPBuffer)-1);
     if (len > 0 && serialESPBuffer[len-1] == '\r') len--;  // trim trailing \r
     serialESPBuffer[len] = '\0';
+
+    if(len > 0){
+      Serial.print(F("ESP32: "));
+      Serial.println(serialESPBuffer);
+    }
 
     DeserializationError err = deserializeJson(doc, serialESPBuffer);
     if(!err){
@@ -597,11 +603,6 @@ void checkESP32Messages() {
         debugLog(serialESPBuffer);
       }
     }
-
-    if(len > 0){
-      Serial.print(F("ESP32: "));
-      Serial.println(serialESPBuffer);
-    }
   }
 }
 
@@ -613,7 +614,17 @@ void setup() {
   Serial.begin(115200);
   // ESP32 serial
   Serial1.begin(115200);
-  delay(1000);
+
+  //Temperature sensor setup
+  tempSensor.begin();
+  tempSensor.setWaitForConversion(false);
+  tempSensor.requestTemperatures();
+
+  // Atlas Scientific probes setup
+  Serial2.begin(9600);
+  Serial3.begin(9600);
+
+  delay(1000); // For serials to initialize and tempSensor to get first reading
 
   debugLog("Mega 2560 reboot");
   // Clock setup
@@ -640,16 +651,10 @@ void setup() {
   lcd.init();
   lcd.backlight();
 
-  // Sensors setup
-  tempSensor.begin();
-
+  // Water level sensor setup
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   digitalWrite(TRIG_PIN, LOW);
-
-  // Atlas Scientific probes setup
-  Serial2.begin(9600);
-  Serial3.begin(9600);
 
   // Setting water level and reading temperature after reset
   measurements.recoverWaterLevel();
