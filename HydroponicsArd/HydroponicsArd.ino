@@ -555,8 +555,7 @@ void checkESP32Messages() {
         const char* cmd = doc["cmd"];
         if(strcmp(cmd, "setConfig") == 0){
           if(doc.containsKey("pumpOn") && doc.containsKey("pumpCycle") && doc.containsKey("lightOn") && doc.containsKey("lightOff") && doc.containsKey("readingInt")){
-            config.updateConfig(doc["pumpOn"].as<long>(), doc["pumpCycle"].as<long>(),
-                                doc["lightOn"].as<long>(), doc["lightOff"].as<long>(), doc["readingInt"].as<long>());
+            config.updateConfig(doc["pumpOn"].as<long>(), doc["pumpCycle"].as<long>(), doc["lightOn"].as<long>(), doc["lightOff"].as<long>(), doc["readingInt"].as<long>());
           }
           else{
             debugLog("setConfig missing fields");
