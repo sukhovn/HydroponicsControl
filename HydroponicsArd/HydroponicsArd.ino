@@ -9,15 +9,17 @@
 #include <ArduinoJson.h>
 
 RTC_DS1307 rtc;
-LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // EEPROM address to store timer config
 #define EEPROM_ADDR 0
 #define EEPROM_MAGIC 0xAB  // sentinel to detect valid data
 
 // Button and pump leg shift parameters
-#define BUTTON_1 28
-#define LEG_SHIFT 30
+#define RELAY_1 22
+#define RELAY_2 23
+#define BUTTON_1 24
+
+bool buttonOneStatus;
 
 // One wire bus
 #define ONE_WIRE_BUS 4
@@ -216,6 +218,58 @@ public:
 
 static_assert(__is_trivially_copyable(Config), "Config must be trivially copyable for EEPROM.put");
 
+class LCDControl{
+  LiquidCrystal_I2C lcd;
+  char lcdLine0[17];
+  char lcdLine1[17];
+
+public:
+  LCDControl(): lcd(0x27, 16, 2) {
+    memset(lcdLine0, ' ', 16);
+    lcdLine0[16] = '\0';
+    memset(lcdLine1, ' ', 16);
+    lcdLine1[16] = '\0';
+  };
+
+  void setup(){
+    lcd.init();
+    lcd.backlight();
+  }
+
+  void reset(){
+    setup();
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(lcdLine0);
+    lcd.setCursor(0, 1);
+    lcd.print(lcdLine1);
+  }
+
+  void print(const char *newLine0, size_t len0, const char *newLine1, size_t len1){
+    bool changed = false;
+    if(strcmp(lcdLine0, newLine0) != 0){
+      memset(lcdLine0, ' ', 16);
+      lcdLine0[16] = '\0';
+      strncpy(lcdLine0, newLine0, len0 < 16 ? len0 : 16);
+      changed = true;
+    }
+    if(strcmp(lcdLine1, newLine1) != 0){
+      memset(lcdLine1, ' ', 16);
+      lcdLine1[16] = '\0';
+      strncpy(lcdLine1, newLine1, len1 < 16 ? len1 : 16);
+      changed = true;
+    }
+
+    if(changed){
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(lcdLine0);
+      lcd.setCursor(0, 1);
+      lcd.print(lcdLine1);
+    }
+  }
+} lcdControl;
+
 // Timer code
 class RelayTimer{
   const Config &cfg;
@@ -231,20 +285,18 @@ class RelayTimer{
   bool lightOverride;
 
   void switchPumpOn(){
-    digitalWrite(LEG_SHIFT, LOW);
+    digitalWrite(RELAY_1, LOW);
     if(!pumpIsOn){
-      lcd.init();
-      lcd.backlight();
+      lcdControl.reset();
       pumpIsOn = true;
       debugLog("Pump switched on");
     }
   }
 
   void switchPumpOff(){
-    digitalWrite(LEG_SHIFT, HIGH);
+    digitalWrite(RELAY_1, HIGH);
     if(pumpIsOn){
-      lcd.init();
-      lcd.backlight();
+      lcdControl.reset();
       pumpIsOn = false;
       pumpOffTime = totalSeconds;
       debugLog("Pump switched off");
@@ -252,20 +304,18 @@ class RelayTimer{
   }
 
   void switchLightOn(){
-    digitalWrite(LEG_SHIFT+1, LOW);
+    digitalWrite(RELAY_2, LOW);
     if(!lightIsOn){
-      lcd.init();
-      lcd.backlight();
+      lcdControl.reset();
       lightIsOn = true;
       debugLog("Light switched on");
     }
   }
 
   void switchLightOff(){
-    digitalWrite(LEG_SHIFT+1, HIGH);
+    digitalWrite(RELAY_2, HIGH);
     if(lightIsOn){
-      lcd.init();
-      lcd.backlight();
+      lcdControl.reset();
       lightIsOn = false;
       debugLog("Light switched off");
     }
@@ -291,24 +341,24 @@ public:
     daySeconds = totalSeconds % 86400;
     cycleSeconds = totalSeconds % cfg.pumpCycle;
 
-    pinMode(LEG_SHIFT, OUTPUT);
+    pinMode(RELAY_1, OUTPUT);
     if(cycleSeconds < cfg.pumpOn){
-      digitalWrite(LEG_SHIFT, LOW);
+      digitalWrite(RELAY_1, LOW);
       pumpIsOn = true;
     }
     else{
-      digitalWrite(LEG_SHIFT, HIGH);
+      digitalWrite(RELAY_1, HIGH);
       pumpIsOn = false;
       pumpOffTime = (totalSeconds/cfg.pumpCycle)*cfg.pumpCycle + cfg.pumpOn;
     }
 
-    pinMode(LEG_SHIFT+1, OUTPUT);
+    pinMode(RELAY_2, OUTPUT);
     if(daySeconds >= cfg.lightOn && daySeconds < cfg.lightOff){
-      digitalWrite(LEG_SHIFT+1, LOW);
+      digitalWrite(RELAY_2, LOW);
       lightIsOn = true;
     }
     else{
-      digitalWrite(LEG_SHIFT+1, HIGH);
+      digitalWrite(RELAY_2, HIGH);
       lightIsOn = false;
     }
 
@@ -376,11 +426,7 @@ public:
       snprintf(line1, sizeof(line1), "Light override");
     }
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(line0);
-    lcd.setCursor(0, 1);
-    lcd.print(line1);
+    lcdControl.print(line0, sizeof(line0), line1, sizeof(line1));
   }
 
   void overridePump(bool pump){
@@ -535,11 +581,7 @@ public:
     dtostrf(waterLevel, 6, 1, buffer2);
     snprintf(line1, sizeof(line1), "T%s L%s", buffer1, buffer2);
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(line0);
-    lcd.setCursor(0, 1);
-    lcd.print(line1);
+    lcdControl.print(line0, sizeof(line0), line1, sizeof(line1));
   }
 } measurements(config, 30);
 
@@ -646,10 +688,10 @@ void setup() {
   // Relay and buttons pins setup
   relay_timer.setup(dt);
   pinMode(BUTTON_1, INPUT_PULLUP);
+  buttonOneStatus = (digitalRead(BUTTON_1) == LOW);
 
   // LCD setup
-  lcd.init();
-  lcd.backlight();
+  lcdControl.setup();
 
   // Water level sensor setup
   pinMode(TRIG_PIN, OUTPUT);
@@ -681,10 +723,18 @@ void loop() {
     measurements.update(dt);
     relay_timer.update(dt);
 
-    if (digitalRead(BUTTON_1) == LOW)
+    if(digitalRead(BUTTON_1) == LOW){
+      if(!buttonOneStatus)
+        buttonOneStatus = true;
       relay_timer.printStatus();
-    else
+    }
+    else{
+      if(buttonOneStatus){
+        buttonOneStatus = false;
+        lcdControl.setup();
+      }
       measurements.printStatus();
+    }
 
     last_second = dt.second();
   }
