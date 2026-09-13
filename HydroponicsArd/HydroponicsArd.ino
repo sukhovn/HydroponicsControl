@@ -34,7 +34,9 @@ DallasTemperature tempSensor(&oneWire);
 #define TIMEOUT_US 30000
 
 // Temp variables
-uint8_t last_second;
+unsigned long previousMillis;
+const long interval = 1000;
+
 char line0[17];
 char line1[17];
 char serialBuffer[20];
@@ -71,6 +73,16 @@ bool isValidFloat(const char* buf) {
     hasDigit = true;
   }
   return hasDigit;
+}
+
+// Valid timestamp check
+bool isValidTimestamp(DateTime& dt) {
+    return dt.year()   >= 2020 && dt.year()   <= 2100 &&
+           dt.month()  >= 1    && dt.month()  <= 12   &&
+           dt.day()    >= 1    && dt.day()    <= 31   &&
+           dt.hour()   <= 23   &&
+           dt.minute() <= 59   &&
+           dt.second() <= 59;
 }
 
 // Reading water level
@@ -511,7 +523,8 @@ public:
     waterTemp = tempSensor.getTempCByIndex(0);
     tempSensor.requestTemperatures();
     if(relay_timer.timeAfterPumpOff() >= levelMeasureCooldown){
-      waterLevel = 24.6 - readLevel(); // Bucket depth with no water as measured by ultrasound is 24.6
+      // waterLevel = 24.6 - readLevel(); // Bucket depth with no water as measured by ultrasound is 24.6
+      waterLevel = 0;
       if(waterLevelFrozen){
         ds1307_write_byte(SRAM_FLAG_ADDR, 0);
         waterLevelFrozen = false;
@@ -578,8 +591,9 @@ public:
     memset(line1, ' ', 16);
     line1[16] = '\0'; 
     dtostrf(waterTemp, 5, 1, buffer1);
-    dtostrf(waterLevel, 6, 1, buffer2);
-    snprintf(line1, sizeof(line1), "T%s L%s", buffer1, buffer2);
+    // dtostrf(waterLevel, 6, 1, buffer2);
+    // snprintf(line1, sizeof(line1), "T%s L%s", buffer1, buffer2);
+    snprintf(line1, sizeof(line1), "Temp %s", buffer1);
 
     lcdControl.print(line0, sizeof(line0), line1, sizeof(line1));
   }
@@ -682,7 +696,7 @@ void setup() {
   config.load();
 
   DateTime dt = rtc.now();
-  last_second = dt.second();
+  previousMillis = 0;
   measurements.setLastMeasurement(dt);
 
   // Relay and buttons pins setup
@@ -715,11 +729,12 @@ void setup() {
 
 void loop() {
   wdt_reset();
-
-  DateTime dt = rtc.now();
   measurements.serialCheck();
 
-  if(dt.second() != last_second){
+  unsigned long currentMillis = millis();
+  if(currentMillis - previousMillis >= interval){
+    DateTime dt = rtc.now();
+    if(!isValidTimestamp(dt)) return;
     measurements.update(dt);
     relay_timer.update(dt);
 
@@ -736,7 +751,7 @@ void loop() {
       measurements.printStatus();
     }
 
-    last_second = dt.second();
+    previousMillis = currentMillis;
   }
 
   checkESP32Messages();

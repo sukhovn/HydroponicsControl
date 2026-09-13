@@ -47,8 +47,58 @@ bool connectWiFi() {
   }
 }
 
-void sendToSupabase(String jsonPayload, bool debug=false) {
-  if (WiFi.status() != WL_CONNECTED) {
+const unsigned long HTTP_REUSE_TIMEOUT = 25000;  // 25 seconds, under Supabase's ~30s limit
+
+HTTPClient httpDebug;
+bool httpDebugInit = false;
+unsigned long httpDebugLastUse = 0;
+
+void initHttp(HTTPClient &http, bool debug){
+  http.end();  // close any existing connection cleanly
+  http.begin(debug ? supabaseUrlDebug : supabaseUrl);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("apikey", supabaseKey);
+  http.addHeader("Authorization", String("Bearer ") + supabaseKey);
+  http.addHeader("Prefer", "return=minimal");
+  if(debug){
+    http.setReuse(true);
+    httpDebugInit = true;
+  }
+}
+
+void sendDebugToSupabase(String jsonPayload){
+  if(WiFi.status() != WL_CONNECTED){
+    httpDebugInit = false;
+    Serial.println("No WiFi - reconnecting...");
+    Serial2.println("No WiFi - reconnecting...");
+    if(!connectWiFi())
+      return;
+  }
+
+  unsigned long now = millis();
+  if(!httpDebugInit || (now - httpDebugLastUse > HTTP_REUSE_TIMEOUT)){
+    initHttp(httpDebug, true);
+  }
+
+  int responseCode = httpDebug.POST(jsonPayload);
+  if(responseCode < 0){
+    // still failed despite proactive reconnect, try once more
+    initHttp(httpDebug, true);
+    responseCode = httpDebug.POST(jsonPayload);
+  }
+
+  httpDebugLastUse = millis();
+
+  if(responseCode == 201){
+    Serial.println("Supabase debug sent");
+  }
+  else{
+    Serial.println("Supabase error: " + String(responseCode));
+  }
+}
+
+void sendReadingToSupabase(String jsonPayload){
+  if(WiFi.status() != WL_CONNECTED){
     Serial.println("No WiFi - reconnecting...");
     Serial2.println("No WiFi - reconnecting...");
     if(!connectWiFi())
@@ -56,30 +106,14 @@ void sendToSupabase(String jsonPayload, bool debug=false) {
   }
 
   HTTPClient http;
-  if(debug)
-    http.begin(supabaseUrlDebug);
-  else
-    http.begin(supabaseUrl);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("apikey", supabaseKey);
-  http.addHeader("Authorization", String("Bearer ") + supabaseKey);
-  http.addHeader("Prefer", "return=minimal");
-
+  initHttp(http, false);
   int responseCode = http.POST(jsonPayload);
 
-  if (responseCode == 201) {
-    if(debug)
-      Serial.println("Supabase debug sent " + jsonPayload);
-    else
-      debugLog("Supabase reading sent");
-  } else {
-    String msg = "Supabase error: " + String(responseCode);
-    if(debug){
-      Serial.println(msg);
-      Serial2.println(msg);
-    }
-    else
-      debugLog(msg);
+  if(responseCode == 201){
+    debugLog("Supabase reading sent");
+  }
+  else{
+    debugLog("Supabase error: " + String(responseCode));
   }
 
   http.end();
@@ -120,7 +154,7 @@ void debugLog(String msg){
   if(loggingConfig.enabled){
     String payload;
     serializeJson(doc, payload);
-    sendToSupabase(payload, true);
+    sendDebugToSupabase(payload);
   }
 }
 
@@ -505,7 +539,7 @@ void loop() {
             if(loggingConfig.enabled){
               String payload;
               serializeJson(doc, payload);
-              sendToSupabase(payload, true);
+              sendDebugToSupabase(payload);
             }
           }
           else if(cmd == "configReport"){
@@ -514,7 +548,7 @@ void loop() {
           else if(cmd == "reading"){
             String payload;
             serializeJson(doc, payload);
-            sendToSupabase(payload, false);
+            sendReadingToSupabase(payload);
           }
           else{
             debugLog("From Mega: " + incomingBuffer + ", unrecognized cmd command");
