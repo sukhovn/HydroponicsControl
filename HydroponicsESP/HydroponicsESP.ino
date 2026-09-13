@@ -1,3 +1,4 @@
+#include <time.h>
 // WiFi settings
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -12,6 +13,15 @@
 // ── Supabase URLs ──────────────────────────────────────
 const char* supabaseUrl = "https://nyinrfhjksqaludvlvdj.supabase.co/rest/v1/readings";
 const char* supabaseUrlDebug = "https://nyinrfhjksqaludvlvdj.supabase.co/rest/v1/debug";
+
+// ── Clock sync ──────────────────────────────────────
+const char* TZ_INFO = "EDT4";
+
+const unsigned long TIME_SYNC_INTERVAL = 6UL * 3600UL * 1000UL;  // 6 h
+const unsigned long TIME_RETRY_INTERVAL = 60000UL;               // 1 min on failure
+unsigned long lastTimeSync = 0;
+bool timeSynced = false;
+bool ntpStarted = false;
 
 // ── State ─────────────────────────────────────────────────────
 String incomingBuffer = "";
@@ -490,6 +500,37 @@ void setupServer() {
   debugLog("Web server started");
 }
 
+// Time synchronization
+bool sendTimeToMega(){
+  if(WiFi.status() != WL_CONNECTED) return false;
+  if(!ntpStarted){
+    configTzTime(TZ_INFO, "pool.ntp.org", "time.google.com");
+    ntpStarted = true;
+  }
+
+  struct tm t;
+  if(!getLocalTime(&t, 5000)){      // blocks up to 5 s waiting for NTP
+    debugLog("NTP sync failed");
+    return false;
+  }
+  if(t.tm_year + 1900 < 2023) return false;   // sanity check
+
+  StaticJsonDocument<128> cmd;
+  cmd["cmd"] = "setTime";
+  cmd["y"]  = t.tm_year + 1900;
+  cmd["mo"] = t.tm_mon + 1;
+  cmd["d"]  = t.tm_mday;
+  cmd["h"]  = t.tm_hour;
+  cmd["mi"] = t.tm_min;
+  cmd["s"]  = t.tm_sec;
+
+  String out;
+  serializeJson(cmd, out);
+  Serial2.println(out);
+  debugLog("Sent to Mega: " + out);
+  return true;
+}
+
 void setup() {
   Serial.begin(115200);          // USB debug
   Serial2.begin(115200, SERIAL_8N1, 16, 17);         // UART2: GPIO16 (RX) / GPIO17 (TX) ← Mega
@@ -512,6 +553,15 @@ void setup() {
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    unsigned long now = millis();
+    unsigned long wait = timeSynced ? TIME_SYNC_INTERVAL : TIME_RETRY_INTERVAL;
+    if (lastTimeSync == 0 || now - lastTimeSync >= wait) {
+      timeSynced = sendTimeToMega();
+      lastTimeSync = millis() | 1;   // never 0, so the "first run" test stays valid
+    }
   }
 
   while (Serial2.available()) {

@@ -649,6 +649,30 @@ void checkESP32Messages() {
             debugLog("override missing manual");
           }
         }
+        else if(strcmp(cmd, "setTime") == 0){
+          if(doc.containsKey("y") && doc.containsKey("mo") && doc.containsKey("d") &&
+             doc.containsKey("h") && doc.containsKey("mi") && doc.containsKey("s"))
+          {
+            DateTime newTime(doc["y"].as<uint16_t>(), doc["mo"].as<uint8_t>(), doc["d"].as<uint8_t>(),
+                            doc["h"].as<uint8_t>(), doc["mi"].as<uint8_t>(), doc["s"].as<uint8_t>());
+            if(isValidTimestamp(newTime)){
+              long drift = (long) newTime.unixtime() - (long) rtc.now().unixtime();
+              if(drift >= 2 || drift <= -2){
+                rtc.adjust(newTime);
+                measurements.setLastMeasurement(newTime);   // keep the reading timer sane
+                char localBuf[64];
+                snprintf(localBuf, sizeof(localBuf), "RTC synced, drift was %ld s", drift);
+                debugLog(localBuf);
+              }
+            }
+            else{
+              debugLog("setTime out of range");
+            }
+          }
+          else{
+            debugLog("setTime missing fields");
+          }
+        }
         else{
           char localBuf[80];
           snprintf(localBuf, sizeof(localBuf), "Unknown cmd: %s", cmd);
@@ -693,9 +717,15 @@ void setup() {
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
 
+  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  DateTime dt = rtc.now();
+  char ctime_buff[40];
+  snprintf(ctime_buff, sizeof(ctime_buff),"Current time %04d/%02d/%02d %02d:%02d:%02d",
+           dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second());
+  Serial.println(ctime_buff);
+
   config.load();
 
-  DateTime dt = rtc.now();
   previousMillis = 0;
   measurements.setLastMeasurement(dt);
 
@@ -744,10 +774,8 @@ void loop() {
       relay_timer.printStatus();
     }
     else{
-      if(buttonOneStatus){
+      if(buttonOneStatus)
         buttonOneStatus = false;
-        lcdControl.setup();
-      }
       measurements.printStatus();
     }
 
